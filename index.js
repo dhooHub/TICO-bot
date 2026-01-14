@@ -1,15 +1,15 @@
 const express = require("express");
 const app = express();
 
-app.get("/", (req, res) => res.send("OK - TICO-bot vivo ✅"));
+app.use(express.json());
 
-app.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = "tico_verify_123";
-  app.post("/webhook", (req, res) => {
-  console.log("Mensaje recibido:", JSON.stringify(req.body, null, 2));
-  res.sendStatus(200);
+app.get("/", (req, res) => {
+  res.send("OK - TICO-bot vivo ✅");
 });
 
+// Verificación de Meta (GET)
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = "tico_verify_123";
 
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -22,9 +22,15 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
+// Recepción de eventos/mensajes (POST)
+app.post("/webhook", (req, res) => {
+  console.log("Mensaje recibido:", JSON.stringify(req.body, null, 2));
+  return res.sendStatus(200);
+});
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Running"));
+app.listen(PORT, () => console.log("Running on port", PORT));
+
 
 
 
