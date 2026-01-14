@@ -1,15 +1,20 @@
 const express = require("express");
 const app = express();
 
-// Permite leer JSON (necesario para WhatsApp)
+// Necesario para leer JSON de WhatsApp
 app.use(express.json());
 
-// Ruta base
+// Ruta base para probar que el servidor está vivo
 app.get("/", (req, res) => {
   res.send("OK - TICO-bot vivo ✅");
 });
 
-// Webhook GET - Verificación de Meta
+/*
+==============================
+  VERIFICACIÓN DEL WEBHOOK
+  (Meta llama por GET)
+==============================
+*/
 app.get("/webhook", (req, res) => {
   const VERIFY_TOKEN = "tico_verify_123";
 
@@ -18,13 +23,20 @@ app.get("/webhook", (req, res) => {
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("Webhook verificado correctamente");
     return res.status(200).send(challenge);
   }
 
+  console.log("Fallo verificación webhook");
   return res.sendStatus(403);
 });
 
-// Webhook POST - Mensajes entrantes
+/*
+==============================
+  RECEPCIÓN DE MENSAJES
+  (Meta llama por POST)
+==============================
+*/
 app.post("/webhook", (req, res) => {
   console.log("Mensaje recibido:");
   console.log(JSON.stringify(req.body, null, 2));
@@ -32,11 +44,12 @@ app.post("/webhook", (req, res) => {
   res.sendStatus(200);
 });
 
-// Servidor
+// Puerto (Railway lo inyecta)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("Servidor corriendo en puerto", PORT);
 });
+
 
 
 
