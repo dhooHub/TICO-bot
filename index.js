@@ -1,44 +1,11 @@
-/**
- * TICO-bot (MVP terminado v1.2)
- * - WhatsApp inbound (Meta)
- * - Telegram inbound (respuesta vendedor)
- * - Fichas mensuales + métricas (en memoria)
- * - Reset mensual automático
- * - /status protegido para ver números
- *
- * Variables Railway (mínimas):
- * VERIFY_TOKEN
- * WHATSAPP_TOKEN
- * WHATSAPP_PHONE_NUMBER_ID
- * TELEGRAM_BOT_TOKEN
- * TELEGRAM_CHAT_ID
- *
- * Variables recomendadas:
- * STORE_NAME
- * CATALOG_URL
- * HOURS_DAY
- * STORE_TYPE (virtual|fisica)
- * MAPS_URL
- *
- * Fichas / planes:
- * MONTHLY_TOKENS=100
- * PACK_TOKENS=10
- * PACK_PRICE_CRC=1000
- * SINPE_NUMBER=########
- * SINPE_NAME=Nombre Apellido
- *
- * Admin:
- * ADMIN_KEY=algo-secreto (para /status)
- * TELEGRAM_SECRET_TOKEN=algo (si querés validar Telegram webhook)
- */
-
 const express = require("express");
 const app = express();
+
 app.use(express.json());
 
 /**
  * ============================
- *  VARIABLES
+ *  VARIABLES (Railway → Variables)
  * ============================
  */
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "tico_verify_123";
@@ -56,40 +23,41 @@ const HOURS_DAY = process.env.HOURS_DAY || "9am-7pm";
 const STORE_TYPE = (process.env.STORE_TYPE || "virtual").toLowerCase(); // virtual | fisica
 const MAPS_URL = process.env.MAPS_URL || "";
 
-// Fichas (Plan Básico)
+// Fichas / Plan
 const MONTHLY_TOKENS = Number(process.env.MONTHLY_TOKENS || 100);
 const PACK_TOKENS = Number(process.env.PACK_TOKENS || 10);
 const PACK_PRICE_CRC = Number(process.env.PACK_PRICE_CRC || 1000);
 
-const SINPE_NUMBER = process.env.SINPE_NUMBER || ""; // ej: 88888888
-const SINPE_NAME = process.env.SINPE_NAME || "";     // ej: "Hernán X"
-const ADMIN_KEY = process.env.ADMIN_KEY || "";
+const SINPE_NUMBER = process.env.SINPE_NUMBER || "";
+const SINPE_NAME = process.env.SINPE_NAME || "";
+
+const ADMIN_KEY = process.env.ADMIN_KEY || ""; // para /status
 
 /**
  * ============================
- *  ESTADO: SESIONES + CUENTA (en memoria)
+ *  ESTADO EN MEMORIA (MVP)
  * ============================
  */
 const sessions = new Map();
 const CLOSE_AFTER_MS = 2 * 60 * 60 * 1000; // 2 horas
 
-// “Cuenta” única por deploy (1 tienda por instancia)
+// Cuenta única por instancia (1 tienda en este MVP)
 const account = {
-  month_key: currentMonthKey(),       // "YYYY-MM"
-  monthly_tokens: MONTHLY_TOKENS,     // asignación mensual base
+  month_key: currentMonthKey(),
+  monthly_tokens: MONTHLY_TOKENS,
+  tokens_used: 0,
+  tokens_packs_added: 0,
   pack_tokens: PACK_TOKENS,
   pack_price_crc: PACK_PRICE_CRC,
-  tokens_used: 0,
-  tokens_packs_added: 0,              // tokens extra comprados (en memoria)
   metrics: {
-    chats_total: 0,                   // mensajes entrantes (aprox)
-    new_contacts: 0,                  // sesiones nuevas
-    quotes_requested: 0,              // enviado a vendedor
-    quotes_sent: 0,                   // precio enviado al cliente
-    no_stock: 0,                      // vendedor dijo NO
-    intent_yes: 0,                    // cliente dijo SI
-    intent_no: 0,                     // cliente dijo NO
-    closed_timeout: 0,                // cierre por 2h
+    chats_total: 0,
+    new_contacts: 0,
+    quotes_requested: 0,
+    quotes_sent: 0,
+    no_stock: 0,
+    intent_yes: 0,
+    intent_no: 0,
+    closed_timeout: 0,
   },
 };
 
@@ -106,7 +74,6 @@ function ensureMonthlyResetIfNeeded() {
     account.month_key = key;
     account.tokens_used = 0;
     account.tokens_packs_added = 0;
-    // métricas se pueden resetear mensual (recomendado)
     account.metrics = {
       chats_total: 0,
       new_contacts: 0,
@@ -124,15 +91,12 @@ function ensureMonthlyResetIfNeeded() {
 function tokensTotal() {
   return account.monthly_tokens + account.tokens_packs_added;
 }
-
 function tokensRemaining() {
   return Math.max(0, tokensTotal() - account.tokens_used);
 }
-
 function canConsumeToken() {
   return tokensRemaining() > 0;
 }
-
 function consumeToken(reason = "INTENCION_SI") {
   if (!canConsumeToken()) return false;
   account.tokens_used += 1;
@@ -140,16 +104,9 @@ function consumeToken(reason = "INTENCION_SI") {
   return true;
 }
 
-// Si querés “simular” compra de packs (mientras no hay automatización)
-function addPackTokens(packs = 1) {
-  const add = account.pack_tokens * Math.max(1, Number(packs || 1));
-  account.tokens_packs_added += add;
-  console.log(`➕ Packs agregados: +${add} fichas. Total: ${tokensTotal()}`);
-}
-
 /**
  * ============================
- *  SESIÓN POR CLIENTE (waId)
+ *  SESIÓN POR CLIENTE
  * ============================
  */
 function getSession(waId) {
@@ -164,7 +121,7 @@ function getSession(waId) {
       last_activity: Date.now(),
       close_timer: null,
       last_prefix: null,
-      last_offer: null, // { price, shipping }
+      last_offer: null,
     });
     account.metrics.new_contacts += 1;
   }
@@ -194,7 +151,7 @@ function resetCaseForNewPhoto(session) {
 
 /**
  * ============================
- *  TEXTO HUMANO TICO
+ *  TEXTO HUMANO TICO (ROTACIÓN)
  * ============================
  */
 const FIXED_ASK_DETAILS = "¿Qué talla, tamaño, color u otra característica buscás?";
@@ -213,8 +170,9 @@ function msgAskDetails(session) {
 }
 
 function msgOutOfTokens() {
-  // Mensaje cuando no quedan fichas (simple y vendible)
-  const sinpeLine = SINPE_NUMBER ? `\n💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}` : "";
+  const sinpeLine = SINPE_NUMBER
+    ? `\n💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}`
+    : "";
   return `⚠️ Este mes ya se usaron todas las fichas del plan 🙌
 
 Para seguir atendiendo intenciones de compra, activá un pack extra:
@@ -225,7 +183,7 @@ Cuando lo activés, me avisás y seguimos 👌`;
 
 /**
  * ============================
- *  DETECCIÓN DETALLE MÍNIMO
+ *  DETECCIÓN DE "DETALLE MÍNIMO"
  * ============================
  */
 const COLORS = [
@@ -250,6 +208,7 @@ function hasColor(text) {
 function isMinimalDetail(text) {
   const t = (text || "").trim();
   if (!t) return false;
+
   const low = t.toLowerCase();
   const genericOnly =
     low === "?" ||
@@ -287,7 +246,7 @@ function isNo(text) {
 
 /**
  * ============================
- *  WHATSAPP / TELEGRAM HELPERS
+ *  WHATSAPP / TELEGRAM (helpers)
  * ============================
  */
 async function sendTelegram(text) {
@@ -315,7 +274,6 @@ async function sendWhatsAppText(toWaId, bodyText) {
   }
 
   const url = `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-
   await fetch(url, {
     method: "POST",
     headers: {
@@ -333,7 +291,7 @@ async function sendWhatsAppText(toWaId, bodyText) {
 
 /**
  * ============================
- *  EXTRAER MENSAJE WHATSAPP
+ *  EXTRAER MENSAJE (WhatsApp payload)
  * ============================
  */
 function extractMessage(payload) {
@@ -345,8 +303,10 @@ function extractMessage(payload) {
 
     const waId = contact?.wa_id || msg.from;
     const type = msg.type;
+
     const text = type === "text" ? (msg.text?.body || "").trim() : "";
-    const imageId = type === "image" ? msg.image?.id || null : null;
+
+    const imageId = type === "image" ? (msg.image?.id || null) : null;
     const caption = type === "image" ? (msg.image?.caption || "").trim() : "";
 
     return { waId, type, text, imageId, caption };
@@ -357,7 +317,7 @@ function extractMessage(payload) {
 
 /**
  * ============================
- *  TELEGRAM PARSE
+ *  TELEGRAM PARSE (respuesta vendedor)
  * ============================
  */
 function extractWaIdFromTelegramUpdate(update) {
@@ -377,7 +337,6 @@ function extractWaIdFromTelegramUpdate(update) {
     const m = t.match(/Cliente:\s*(\d{8,15})/i);
     if (m) return m[1];
   }
-
   for (const t of candidates) {
     const m = t.match(/\b(\d{8,15})\b/);
     if (m) return m[1];
@@ -389,7 +348,6 @@ function extractWaIdFromTelegramUpdate(update) {
 function parseSellerReplyFromTelegramText(text) {
   const raw = (text || "").trim();
   const upper = raw.toUpperCase();
-
   if (upper === "NO") return { type: "NO_STOCK" };
 
   const parts = raw.split(/\s+/).filter(Boolean);
@@ -397,10 +355,7 @@ function parseSellerReplyFromTelegramText(text) {
     .map((p) => Number(String(p).replace(/[^\d]/g, "")))
     .filter((n) => !isNaN(n) && n > 0);
 
-  if (nums.length >= 1) {
-    return { type: "PRICE", price: nums[0], shipping: nums.length >= 2 ? nums[1] : null };
-  }
-
+  if (nums.length >= 1) return { type: "PRICE", price: nums[0], shipping: nums.length >= 2 ? nums[1] : null };
   return { type: "UNKNOWN" };
 }
 
@@ -409,15 +364,17 @@ function parseSellerReplyFromTelegramText(text) {
  *  ENDPOINTS
  * ============================
  */
-app.get("/", (req, res) => res.send("OK - TICO-bot vivo ✅"));
+app.get("/", (req, res) => {
+  res.send("OK - TICO-bot vivo ✅");
+});
 
-/**
- * Admin status (para vos)
- * URL: /status?key=TU_ADMIN_KEY
- */
+// Status (protegido)
 app.get("/status", (req, res) => {
-  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.sendStatus(403);
   ensureMonthlyResetIfNeeded();
+
+  if (!ADMIN_KEY) return res.status(403).send("Forbidden");
+  if (String(req.query.key || "") !== String(ADMIN_KEY)) return res.status(403).send("Forbidden");
+
   return res.json({
     store: STORE_NAME,
     month: account.month_key,
@@ -440,7 +397,11 @@ app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) return res.status(200).send(challenge);
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verificado correctamente");
+    return res.status(200).send(challenge);
+  }
   return res.sendStatus(403);
 });
 
@@ -456,6 +417,7 @@ app.post("/webhook", async (req, res) => {
   if (!msg) return res.sendStatus(200);
 
   const { waId, type, text, imageId, caption } = msg;
+
   account.metrics.chats_total += 1;
 
   const session = getSession(waId);
@@ -464,53 +426,43 @@ app.post("/webhook", async (req, res) => {
 
   console.log("📩 WhatsApp:", { waId, type, text, imageId, caption, state: session.state });
 
-  /**
-   * Si están en PRECIO_ENVIADO y llega FOTO NUEVA:
-   * -> nuevo caso (no interpretar como SI/NO)
-   */
+  // Si estaba en PRECIO_ENVIADO y manda otra foto -> nuevo caso
   if (type === "image" && session.state === "PRECIO_ENVIADO") {
     resetCaseForNewPhoto(session);
     session.last_image_id = imageId;
 
-    const captionText = (caption || "").trim();
+    await sendWhatsAppText(
+      waId,
+      `¡Pura vida! 🙌\n¿Te interesa ese otro? Decime talla, color o tamaño y te confirmo.`
+    );
 
+    // Si además trae detalle mínimo en caption, lo mandamos a vendedor
+    const captionText = (caption || "").trim();
     if (captionText && isMinimalDetail(captionText)) {
       session.last_details_text = captionText;
       session.sent_to_seller = true;
       session.state = "ENVIADO_A_VENDEDOR";
       account.metrics.quotes_requested += 1;
 
-      await sendWhatsAppText(
-        waId,
-        `¡Pura vida! 🙌\n¿Te interesa ese otro? Decime talla, color o tamaño y te confirmo.`
-      );
-
       const waLink = `https://wa.me/${waId}`;
-      const telegramMsg = `📦 Nueva consulta - ${STORE_NAME}
+      await sendTelegram(
+        `📦 Nueva consulta - ${STORE_NAME}
 
 👤 Cliente: ${waId}
 📝 Detalles: ${captionText}
 
-Respondé (idealmente respondiendo a ESTE mensaje):
+Respondé (respondiendo a ESTE mensaje):
 - 7000 2000   (precio envío)
 - NO          (no hay stock)
 
-👉 ${waLink}`;
-
-      await sendTelegram(telegramMsg);
-      return res.sendStatus(200);
+👉 ${waLink}`
+      );
     }
 
-    await sendWhatsAppText(
-      waId,
-      `¡Pura vida! 🙌\n¿Te interesa ese otro? Decime talla, color o tamaño y te confirmo.`
-    );
     return res.sendStatus(200);
   }
 
-  /**
-   * 1) SALUDO
-   */
+  // 1) Saludo
   if (type === "text" && isGreeting(text)) {
     if (!session.catalog_sent && CATALOG_URL) {
       session.catalog_sent = true;
@@ -528,9 +480,7 @@ Respondé (idealmente respondiendo a ESTE mensaje):
     return res.sendStatus(200);
   }
 
-  /**
-   * 2) FOTO
-   */
+  // 2) Foto
   if (type === "image") {
     resetCaseForNewPhoto(session);
 
@@ -539,6 +489,7 @@ Respondé (idealmente respondiendo a ESTE mensaje):
 
     const captionText = (caption || "").trim();
 
+    // Si caption trae detalle mínimo -> mandar a vendedor
     if (captionText && isMinimalDetail(captionText)) {
       session.last_details_text = captionText;
       session.sent_to_seller = true;
@@ -548,36 +499,33 @@ Respondé (idealmente respondiendo a ESTE mensaje):
       await sendWhatsAppText(waId, `Dame un toque, voy a revisar si lo tenemos 👍`);
 
       const waLink = `https://wa.me/${waId}`;
-      const telegramMsg = `📦 Nueva consulta - ${STORE_NAME}
+      await sendTelegram(
+        `📦 Nueva consulta - ${STORE_NAME}
 
 👤 Cliente: ${waId}
 📝 Detalles: ${captionText}
 
-Respondé (idealmente respondiendo a ESTE mensaje):
+Respondé (respondiendo a ESTE mensaje):
 - 7000 2000   (precio envío)
 - NO          (no hay stock)
 
-👉 ${waLink}`;
-
-      await sendTelegram(telegramMsg);
+👉 ${waLink}`
+      );
       return res.sendStatus(200);
     }
 
+    // Caption genérico -> pedir detalle
     session.state = "ESPERANDO_DETALLES";
     await sendWhatsAppText(waId, msgAskDetails(session));
     return res.sendStatus(200);
   }
 
-  /**
-   * 3) TEXTO (incluye SI/NO cuando precio ya fue enviado)
-   */
+  // 3) Texto (incluye SI/NO cuando precio ya fue enviado)
   if (type === "text") {
-    const t = (text || "").toLowerCase();
-
-    // Manejo SI/NO cuando hay precio enviado
+    // Si ya se envió precio, aquí se decide SI/NO
     if (session.state === "PRECIO_ENVIADO") {
       if (isYes(text)) {
-        // Aquí se consume ficha (punto exacto del modelo)
+        // Consume ficha SOLO aquí
         if (!consumeToken("INTENCION_SI")) {
           await sendWhatsAppText(waId, msgOutOfTokens());
           return res.sendStatus(200);
@@ -590,7 +538,7 @@ Respondé (idealmente respondiendo a ESTE mensaje):
           waId,
           STORE_TYPE === "fisica"
             ? `¡Buenísimo! 🙌\n¿Preferís envío o venir a recoger?\n\nRespondé:\n1) ENVÍO\n2) RECOGER`
-            : `¡Buenísimo! 🙌\nPara enviártelo, pasame estos datos:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
+            : `¡Buenísimo! 🙌\nPara enviártelo, pasame:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
         );
         return res.sendStatus(200);
       }
@@ -617,18 +565,18 @@ Respondé (idealmente respondiendo a ESTE mensaje):
         await sendWhatsAppText(waId, `Dame un toque, voy a revisar si lo tenemos 👍`);
 
         const waLink = `https://wa.me/${waId}`;
-        const telegramMsg = `📦 Nueva consulta - ${STORE_NAME}
+        await sendTelegram(
+          `📦 Nueva consulta - ${STORE_NAME}
 
 👤 Cliente: ${waId}
 📝 Detalles: ${text}
 
-Respondé (idealmente respondiendo a ESTE mensaje):
+Respondé (respondiendo a ESTE mensaje):
 - 7000 2000   (precio envío)
 - NO          (no hay stock)
 
-👉 ${waLink}`;
-
-        await sendTelegram(telegramMsg);
+👉 ${waLink}`
+        );
         return res.sendStatus(200);
       }
 
@@ -638,6 +586,7 @@ Respondé (idealmente respondiendo a ESTE mensaje):
     }
 
     // FAQ horario
+    const t = (text || "").toLowerCase();
     if (t.includes("horario") || t.includes("abren") || t.includes("cierran")) {
       await sendWhatsAppText(waId, `🕘 Horario: ${HOURS_DAY}`);
       return res.sendStatus(200);
@@ -653,13 +602,12 @@ Respondé (idealmente respondiendo a ESTE mensaje):
       return res.sendStatus(200);
     }
 
-    // Si pregunta precio/disponibilidad pero no manda foto
+    // Pregunta precio/disponibilidad sin foto
     if (t.includes("precio") || t.includes("cuanto") || t.includes("disponible") || t.includes("tienen")) {
       await sendWhatsAppText(waId, `Listo 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para confirmarte.`);
       return res.sendStatus(200);
     }
 
-    // Default
     await sendWhatsAppText(waId, `Dale 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para ayudarte.`);
     return res.sendStatus(200);
   }
@@ -694,9 +642,7 @@ app.post("/telegram", async (req, res) => {
     const sellerText = msg.text || msg.caption || "";
     console.log("📨 Telegram:", { waId, sellerText, state: session.state });
 
-    if (session.state !== "ENVIADO_A_VENDEDOR") {
-      return res.sendStatus(200);
-    }
+    if (session.state !== "ENVIADO_A_VENDEDOR") return res.sendStatus(200);
 
     const parsed = parseSellerReplyFromTelegramText(sellerText);
 
@@ -725,7 +671,6 @@ app.post("/telegram", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Si no entendimos, avisamos en Telegram (al chat de control)
     await sendTelegram(
       `⚠️ No entendí tu respuesta.\n\nUsá este formato (respondiendo al mensaje del cliente):\n- 7000 2000   (precio envío)\n- NO          (no hay stock)`
     );
@@ -747,5 +692,3 @@ app.listen(PORT, () => {
   console.log("🚀 TICO-bot corriendo en puerto", PORT);
   console.log("✅ Endpoints:", { meta_webhook: "/webhook", telegram_webhook: "/telegram", status: "/status?key=ADMIN_KEY" });
 });
-
-
