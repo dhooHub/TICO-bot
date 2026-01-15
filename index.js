@@ -1,3 +1,20 @@
+/**
+ * TICO-bot (WhatsApp only) - FINAL
+ * - Cliente escribe por WhatsApp (Meta Cloud API inbound /webhook)
+ * - Bot responde al cliente por WhatsApp (Cloud API outbound)
+ * - Dueño recibe avisos por WhatsApp (OWNER_WA_ID) y responde con comandos:
+ *    Q <waId> <precio> [envio]
+ *    NO <waId>
+ *    PACK <packs>
+ *    PEND
+ *    CONFIRM <waId> [nota]
+ *    STATUS
+ *    REPORT
+ *    REPORT3
+ *
+ * - SINPE SMS PRO: GET /sinpe-sms?secret=...&msg=...&time=... (from opcional)
+ */
+
 const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -6,22 +23,27 @@ const path = require("path");
 const app = express();
 app.use(express.json());
 
+// fetch compatible (Node 18+ tiene fetch global; si no, usa node-fetch)
+const fetchFn =
+  global.fetch ||
+  ((...args) => import("node-fetch").then(({ default: fetch }) => fetch(...args)));
+
 /**
  * ============================
  *  VARIABLES (Railway → Variables)
  * ============================
  */
-// Webhooks
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "tico_verify_123";
 
-// Telegram
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
-const TELEGRAM_SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN || "";
+// Meta Webhook verify
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "tico_verify_123";
 
 // WhatsApp Cloud API
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
+
+// Dueño (para notificaciones y comandos)
+const OWNER_WA_ID = String(process.env.OWNER_WA_ID || "").trim(); // ej: 5068xxxxxxx (sin +)
+const OWNER_CMD_KEY = String(process.env.OWNER_CMD_KEY || "").trim(); // opcional; si está, exigimos "KEY <clave> ..." en comandos
 
 // Tienda (1 cuenta por instancia)
 const STORE_NAME = process.env.STORE_NAME || "TICO-bot";
@@ -30,7 +52,7 @@ const HOURS_DAY = process.env.HOURS_DAY || "9am-7pm";
 const STORE_TYPE = (process.env.STORE_TYPE || "virtual").toLowerCase(); // virtual | fisica
 const MAPS_URL = process.env.MAPS_URL || "";
 
-// SINPE (para mostrarle al cliente)
+// SINPE (para mostrar al cliente)
 const SINPE_NUMBER = process.env.SINPE_NUMBER || "";
 const SINPE_NAME = process.env.SINPE_NAME || "";
 
@@ -43,16 +65,14 @@ const PACK_PRICE_CRC = Number(process.env.PACK_PRICE_CRC || 1000);
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
 
 // Dominio base (para links completos)
-const BASE_URL = process.env.BASE_URL || ""; // ej: https://tico-bot-production.up.railway.app
+const BASE_URL = process.env.BASE_URL || "";
 
 // Activación 1-uso (QR)
-const ONBOARD_WA_NUMBER = process.env.ONBOARD_WA_NUMBER || ""; // ej: 50688888888
-
-// Persistencia (opcional)
+const ONBOARD_WA_NUMBER = process.env.ONBOARD_WA_NUMBER || ""; // tu WhatsApp para onboarding
 const TOKENS_PERSIST = String(process.env.TOKENS_PERSIST || "") === "1"; // activations
-const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1";   // stats mensuales (reporte últimos 3 meses)
+const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1"; // stats mensuales (últimos 3 meses)
 
-// SINPE SMS (PRO)
+// SINPE SMS (PRO) - modo GET por querystring (tu app)
 const SINPE_SMS_SECRET = process.env.SINPE_SMS_SECRET || "";
 const SINPE_SMS_LOOKBACK_MIN = Number(process.env.SINPE_SMS_LOOKBACK_MIN || 30);
 
@@ -69,9 +89,7 @@ function currentMonthKey(d = new Date()) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   return `${y}-${m}`;
 }
-
 function previousMonthKey(monthKey) {
-  // monthKey: YYYY-MM
   const [yStr, mStr] = String(monthKey).split("-");
   const y = Number(yStr);
   const m = Number(mStr);
@@ -84,10 +102,9 @@ function previousMonthKey(monthKey) {
  * ============================
  *  STATS MENSUALES (últimos 3 meses)
  * ============================
- * Guarda un snapshot por mes. (Opcional, con STATS_PERSIST=1)
  */
 const STATS_FILE = path.join(process.cwd(), "stats_monthly.json");
-const statsMonthly = new Map(); // monthKey -> snapshot
+const statsMonthly = new Map();
 
 function loadStatsFromDisk() {
   if (!STATS_PERSIST) return;
@@ -96,16 +113,13 @@ function loadStatsFromDisk() {
     const raw = fs.readFileSync(STATS_FILE, "utf-8");
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) {
-      for (const s of arr) {
-        if (s?.month) statsMonthly.set(s.month, s);
-      }
+      for (const s of arr) if (s?.month) statsMonthly.set(s.month, s);
       console.log(`📊 Stats mensuales cargados: ${statsMonthly.size}`);
     }
   } catch (e) {
     console.log("⚠️ No pude cargar stats_monthly.json:", e?.message || e);
   }
 }
-
 function saveStatsToDisk() {
   if (!STATS_PERSIST) return;
   try {
@@ -115,7 +129,6 @@ function saveStatsToDisk() {
     console.log("⚠️ No pude guardar stats_monthly.json:", e?.message || e);
   }
 }
-
 loadStatsFromDisk();
 
 /**
@@ -142,6 +155,8 @@ const account = {
     sinpe_sms_received: 0,
     sinpe_auto_confirmed: 0,
     sinpe_manual_confirmed: 0,
+    owner_notifications: 0,
+    owner_commands: 0,
   },
 };
 
@@ -183,23 +198,20 @@ function ensureMonthlyResetIfNeeded() {
   const key = currentMonthKey();
   if (account.month_key === key) return;
 
-  // Antes de resetear: guardamos snapshot del mes anterior (si persistencia activa)
+  // snapshot mes anterior
   const prev = snapshotCurrentMonth();
   statsMonthly.set(prev.month, prev);
 
-  // Mantener solo últimos 3 meses en disco (opcional)
   if (STATS_PERSIST) {
     const m0 = key;
     const m1 = previousMonthKey(m0);
     const m2 = previousMonthKey(m1);
     const keep = new Set([m0, m1, m2]);
-    for (const k of statsMonthly.keys()) {
-      if (!keep.has(k)) statsMonthly.delete(k);
-    }
+    for (const k of statsMonthly.keys()) if (!keep.has(k)) statsMonthly.delete(k);
     saveStatsToDisk();
   }
 
-  // Reset mes nuevo
+  // reset mes nuevo
   account.month_key = key;
   account.tokens_used = 0;
   account.tokens_packs_added = 0;
@@ -215,6 +227,8 @@ function ensureMonthlyResetIfNeeded() {
     sinpe_sms_received: 0,
     sinpe_auto_confirmed: 0,
     sinpe_manual_confirmed: 0,
+    owner_notifications: 0,
+    owner_commands: 0,
   };
 
   console.log(`🔄 Reset mensual aplicado: ${key}`);
@@ -226,7 +240,7 @@ function ensureMonthlyResetIfNeeded() {
  * ============================
  */
 const ACTIVATIONS_FILE = path.join(process.cwd(), "activations.json");
-const activations = new Map(); // token -> record
+const activations = new Map();
 
 function loadActivationsFromDisk() {
   if (!TOKENS_PERSIST) return;
@@ -235,9 +249,7 @@ function loadActivationsFromDisk() {
     const raw = fs.readFileSync(ACTIVATIONS_FILE, "utf-8");
     const arr = JSON.parse(raw);
     if (Array.isArray(arr)) {
-      for (const r of arr) {
-        if (r?.token) activations.set(r.token, r);
-      }
+      for (const r of arr) if (r?.token) activations.set(r.token, r);
       console.log(`📦 Activations cargadas: ${activations.size}`);
     }
   } catch (e) {
@@ -280,12 +292,14 @@ function getSession(waId) {
       catalog_sent: false,
       last_image_id: null,
       last_details_text: null,
-      sent_to_seller: false,
+      sent_to_owner: false,
       last_activity: Date.now(),
       close_timer: null,
       last_prefix: null,
       last_offer: null, // { price, shipping }
+      shipping_details: null,
       pending_sinpe: null, // { expectedAmount, created_ms, status }
+      last_case_id: null,  // id para referencia interna
     });
     account.metrics.new_contacts += 1;
   }
@@ -296,11 +310,13 @@ function resetCloseTimer(session) {
   if (session.close_timer) clearTimeout(session.close_timer);
   session.close_timer = setTimeout(() => {
     session.state = "CERRADO_SIN_COSTO";
-    session.sent_to_seller = false;
+    session.sent_to_owner = false;
     session.last_image_id = null;
     session.last_details_text = null;
     session.last_offer = null;
+    session.shipping_details = null;
     session.pending_sinpe = null;
+    session.last_case_id = null;
     account.metrics.closed_timeout += 1;
     console.log(`⏱️ Caso cerrado por timeout (2h): ${session.waId}`);
   }, CLOSE_AFTER_MS);
@@ -310,9 +326,11 @@ function resetCaseForNewPhoto(session) {
   session.state = "ESPERANDO_DETALLES";
   session.last_image_id = null;
   session.last_details_text = null;
-  session.sent_to_seller = false;
+  session.sent_to_owner = false;
   session.last_offer = null;
+  session.shipping_details = null;
   session.pending_sinpe = null;
+  session.last_case_id = crypto.randomBytes(6).toString("hex");
 }
 
 /**
@@ -409,26 +427,9 @@ function isNo(text) {
 
 /**
  * ============================
- *  WHATSAPP / TELEGRAM (helpers)
+ *  WhatsApp helpers
  * ============================
  */
-async function sendTelegram(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.log("⚠️ Telegram no configurado (faltan variables).");
-    return;
-  }
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: TELEGRAM_CHAT_ID,
-      text,
-      disable_web_page_preview: true,
-    }),
-  });
-}
-
 async function sendWhatsAppText(toWaId, bodyText) {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
     console.log("⚠️ WhatsApp send desactivado (faltan WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID).");
@@ -437,7 +438,7 @@ async function sendWhatsAppText(toWaId, bodyText) {
   }
 
   const url = `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
-  await fetch(url, {
+  await fetchFn(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${WHATSAPP_TOKEN}`,
@@ -450,6 +451,19 @@ async function sendWhatsAppText(toWaId, bodyText) {
       text: { body: bodyText },
     }),
   });
+}
+
+function mustHaveOwner() {
+  return Boolean(OWNER_WA_ID);
+}
+
+async function notifyOwner(text) {
+  if (!mustHaveOwner()) {
+    console.log("⚠️ OWNER_WA_ID no configurado. No puedo notificar al dueño.");
+    return;
+  }
+  account.metrics.owner_notifications += 1;
+  await sendWhatsAppText(OWNER_WA_ID, text);
 }
 
 /**
@@ -475,49 +489,6 @@ function extractMessage(payload) {
   } catch {
     return null;
   }
-}
-
-/**
- * ============================
- *  TELEGRAM PARSE (respuesta vendedor)
- * ============================
- */
-function extractWaIdFromTelegramUpdate(update) {
-  const msg = update?.message;
-  if (!msg) return null;
-
-  const candidates = [];
-  if (typeof msg.text === "string") candidates.push(msg.text);
-  if (typeof msg.caption === "string") candidates.push(msg.caption);
-
-  if (msg.reply_to_message) {
-    if (typeof msg.reply_to_message.text === "string") candidates.push(msg.reply_to_message.text);
-    if (typeof msg.reply_to_message.caption === "string") candidates.push(msg.reply_to_message.caption);
-  }
-
-  for (const t of candidates) {
-    const m = t.match(/Cliente:\s*(\d{8,15})/i);
-    if (m) return m[1];
-  }
-  for (const t of candidates) {
-    const m = t.match(/\b(\d{8,15})\b/);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-function parseSellerReplyFromTelegramText(text) {
-  const raw = (text || "").trim();
-  const upper = raw.toUpperCase();
-  if (upper === "NO") return { type: "NO_STOCK" };
-
-  const parts = raw.split(/\s+/).filter(Boolean);
-  const nums = parts
-    .map((p) => Number(String(p).replace(/[^\d]/g, "")))
-    .filter((n) => !isNaN(n) && n > 0);
-
-  if (nums.length >= 1) return { type: "PRICE", price: nums[0], shipping: nums.length >= 2 ? nums[1] : null };
-  return { type: "UNKNOWN" };
 }
 
 /**
@@ -604,16 +575,245 @@ function renderActivatePage({ ok, title, msg, buttonText, buttonUrl, small }) {
 
 /**
  * ============================
- *  ENDPOINTS BÁSICOS
+ *  OWNER COMMANDS (WhatsApp)
+ * ============================
+ */
+function stripOwnerKeyPrefix(text) {
+  const raw = String(text || "").trim();
+  if (!OWNER_CMD_KEY) return raw;
+  // exige: KEY <clave> <comando...>
+  const parts = raw.split(/\s+/);
+  if (parts.length >= 3 && parts[0].toUpperCase() === "KEY" && parts[1] === OWNER_CMD_KEY) {
+    return parts.slice(2).join(" ");
+  }
+  return null; // no autorizado
+}
+
+function formatStatus() {
+  return `📊 ${STORE_NAME}
+Mes: ${account.month_key}
+
+🪙 Fichas:
+- Plan: ${account.monthly_tokens}
+- Packs: ${account.tokens_packs_added}
+- Total: ${tokensTotal()}
+- Usadas: ${account.tokens_used}
+- Restantes: ${tokensRemaining()}
+
+📈 Métricas:
+- Chats: ${account.metrics.chats_total}
+- Nuevos: ${account.metrics.new_contacts}
+- Cotizaciones pedidas: ${account.metrics.quotes_requested}
+- Cotizaciones enviadas: ${account.metrics.quotes_sent}
+- No stock: ${account.metrics.no_stock}
+- SI: ${account.metrics.intent_yes}
+- NO: ${account.metrics.intent_no}
+- Timeouts: ${account.metrics.closed_timeout}
+- SINPE SMS: ${account.metrics.sinpe_sms_received}
+- Auto SINPE: ${account.metrics.sinpe_auto_confirmed}
+- Manual SINPE: ${account.metrics.sinpe_manual_confirmed}`;
+}
+
+function reportLast3Text() {
+  const m0 = account.month_key;
+  const m1 = previousMonthKey(m0);
+  const m2 = previousMonthKey(m1);
+
+  const current = snapshotCurrentMonth();
+  statsMonthly.set(current.month, current);
+
+  const list = [m0, m1, m2]
+    .map((m) => statsMonthly.get(m))
+    .filter(Boolean);
+
+  const lines = list.map((s) => {
+    return `📅 ${s.month}
+- Chats: ${s.metrics.chats_total}
+- Cotiz. pedidas: ${s.metrics.quotes_requested}
+- SI: ${s.metrics.intent_yes}
+- NO: ${s.metrics.intent_no}
+- Fichas usadas: ${s.tokens.used}/${s.tokens.total}`;
+  });
+
+  if (!lines.length) return "Aún no hay data de meses anteriores 🙌";
+  return `📌 Resumen últimos 3 meses (${m0}, ${m1}, ${m2})\n\n${lines.join("\n\n")}`;
+}
+
+async function handleOwnerCommand(ownerTextRaw) {
+  const cleaned = stripOwnerKeyPrefix(ownerTextRaw);
+  if (cleaned === null) {
+    await sendWhatsAppText(OWNER_WA_ID, "⛔ Comando no autorizado. (Te falta KEY <clave> ...)");
+    return;
+  }
+
+  const text = cleaned.trim();
+  if (!text) return;
+
+  account.metrics.owner_commands += 1;
+
+  const up = text.toUpperCase();
+
+  // HELP
+  if (up === "HELP" || up === "AYUDA") {
+    await sendWhatsAppText(
+      OWNER_WA_ID,
+      `Comandos:
+- Q <waId> <precio> [envio]
+- NO <waId>
+- PACK <packs>
+- PEND
+- CONFIRM <waId> [nota]
+- STATUS
+- REPORT
+- REPORT3
+
+Ejemplos:
+Q 50688888888 7900 2000
+NO 50688888888
+PACK 1
+PEND
+CONFIRM 50688888888 ok
+STATUS
+REPORT3`
+    );
+    return;
+  }
+
+  // STATUS
+  if (up === "STATUS") {
+    await sendWhatsAppText(OWNER_WA_ID, formatStatus());
+    return;
+  }
+
+  // REPORT / REPORT3
+  if (up === "REPORT") {
+    const current = snapshotCurrentMonth();
+    await sendWhatsAppText(
+      OWNER_WA_ID,
+      `📌 Reporte mes ${current.month}\n- Chats: ${current.metrics.chats_total}\n- Cotiz. pedidas: ${current.metrics.quotes_requested}\n- SI: ${current.metrics.intent_yes}\n- NO: ${current.metrics.intent_no}\n- Fichas: ${current.tokens.used}/${current.tokens.total}`
+    );
+    return;
+  }
+  if (up === "REPORT3") {
+    await sendWhatsAppText(OWNER_WA_ID, reportLast3Text());
+    return;
+  }
+
+  // PACK <packs>
+  if (up.startsWith("PACK")) {
+    const parts = text.split(/\s+/);
+    const packs = Math.max(1, Number(parts[1] || 1));
+    account.tokens_packs_added += packs * PACK_TOKENS;
+    await sendWhatsAppText(
+      OWNER_WA_ID,
+      `✅ Pack aplicado\nPacks: ${packs}\nTotal fichas: ${tokensTotal()}\nRestantes: ${tokensRemaining()}`
+    );
+    return;
+  }
+
+  // PEND (pendientes SINPE)
+  if (up === "PEND") {
+    const list = [];
+    for (const s of sessions.values()) {
+      if (s?.state === "ESPERANDO_SINPE" && s?.pending_sinpe?.status === "pending") {
+        list.push(`- ${s.waId} (monto: ${s.pending_sinpe.expectedAmount || "?"})`);
+      }
+    }
+    await sendWhatsAppText(
+      OWNER_WA_ID,
+      list.length ? `💳 Pendientes SINPE:\n${list.join("\n")}` : "No hay pendientes SINPE 🙌"
+    );
+    return;
+  }
+
+  // NO <waId>
+  if (up.startsWith("NO ")) {
+    const parts = text.split(/\s+/);
+    const waId = parts[1];
+    if (!waId) {
+      await sendWhatsAppText(OWNER_WA_ID, "Usá: NO <waId>");
+      return;
+    }
+    const s = getSession(waId);
+    s.state = "CERRADO_SIN_COSTO";
+    s.sent_to_owner = false;
+    s.last_offer = null;
+    await sendWhatsAppText(waId, `Gracias por esperar 🙌 En este momento no tenemos disponibilidad de ese producto.`);
+    await sendWhatsAppText(OWNER_WA_ID, `✅ Enviado NO STOCK a ${waId}`);
+    account.metrics.no_stock += 1;
+    return;
+  }
+
+  // Q <waId> <precio> [envio]
+  if (up.startsWith("Q ")) {
+    const parts = text.split(/\s+/);
+    const waId = parts[1];
+    const price = Number(String(parts[2] || "").replace(/[^\d]/g, ""));
+    const shipping = parts[3] ? Number(String(parts[3]).replace(/[^\d]/g, "")) : null;
+
+    if (!waId || !price) {
+      await sendWhatsAppText(OWNER_WA_ID, "Usá: Q <waId> <precio> [envio]\nEj: Q 50688888888 7900 2000");
+      return;
+    }
+
+    const s = getSession(waId);
+    s.state = "PRECIO_ENVIADO";
+    s.sent_to_owner = false;
+    s.last_offer = { price, shipping: shipping || null };
+
+    account.metrics.quotes_sent += 1;
+
+    const envioTxt = shipping ? ` + envío ₡${shipping}` : "";
+    await sendWhatsAppText(
+      waId,
+      `¡Sí lo tenemos! 🎉\nTe sale en ₡${price}${envioTxt}.\n\n¿Te interesa comprarlo?\nRespondé:\nSI → para continuar\nNO → si solo estás viendo`
+    );
+
+    await sendWhatsAppText(OWNER_WA_ID, `✅ Precio enviado a ${waId} (₡${price}${shipping ? ` +₡${shipping}` : ""})`);
+    return;
+  }
+
+  // CONFIRM <waId> [nota]
+  if (up.startsWith("CONFIRM")) {
+    const parts = text.split(/\s+/);
+    const waId = parts[1];
+    const note = parts.slice(2).join(" ").trim();
+
+    if (!waId) {
+      await sendWhatsAppText(OWNER_WA_ID, "Usá: CONFIRM <waId> [nota]");
+      return;
+    }
+
+    const s = getSession(waId);
+    if (s.state !== "ESPERANDO_SINPE") {
+      await sendWhatsAppText(OWNER_WA_ID, `Ese cliente no está esperando SINPE. Estado actual: ${s.state}`);
+      return;
+    }
+
+    s.pending_sinpe.status = "paid";
+    s.pending_sinpe.paid_at = new Date().toISOString();
+    s.state = "PAGO_CONFIRMADO";
+    account.metrics.sinpe_manual_confirmed += 1;
+
+    await sendWhatsAppText(waId, `¡Listo! 🙌 Ya quedó confirmado el SINPE. En un toque te confirmamos el apartado y la entrega.`);
+    await sendWhatsAppText(OWNER_WA_ID, `✅ SINPE confirmado manual para ${waId}${note ? `\nNota: ${note}` : ""}`);
+    return;
+  }
+
+  // default
+  await sendWhatsAppText(OWNER_WA_ID, "No entendí ese comando. Escribí HELP para ver la lista.");
+}
+
+/**
+ * ============================
+ *  ENDPOINTS
  * ============================
  */
 app.get("/", (req, res) => res.send("OK - TICO-bot vivo ✅"));
 
 /**
- * ============================
- *  STATUS (Admin)
- *  GET /status?key=ADMIN_KEY
- * ============================
+ * STATUS (Admin)
+ * GET /status?key=ADMIN_KEY
  */
 app.get("/status", (req, res) => {
   ensureMonthlyResetIfNeeded();
@@ -639,46 +839,39 @@ app.get("/status", (req, res) => {
       sinpe_sms_enabled: Boolean(SINPE_SMS_SECRET),
       sinpe_sms_lookback_min: SINPE_SMS_LOOKBACK_MIN,
     },
+    owner: {
+      owner_wa_id_configured: Boolean(OWNER_WA_ID),
+      owner_cmd_key_required: Boolean(OWNER_CMD_KEY),
+    },
   });
 });
 
 /**
- * ============================
- *  REPORTES (Admin)
- *  GET /admin/report?key=ADMIN_KEY
- *  GET /admin/report?key=ADMIN_KEY&mode=last3
- * ============================
+ * REPORTES (Admin)
+ * GET /admin/report?key=ADMIN_KEY
+ * GET /admin/report?key=ADMIN_KEY&mode=last3
  */
 app.get("/admin/report", (req, res) => {
   ensureMonthlyResetIfNeeded();
   if (!ADMIN_KEY || String(req.query.key || "") !== String(ADMIN_KEY)) return res.status(403).send("Forbidden");
 
   const mode = String(req.query.mode || "").trim().toLowerCase();
-
-  // Mes actual (siempre)
   const current = snapshotCurrentMonth();
-  statsMonthly.set(current.month, current); // para que siempre aparezca en reportes
+  statsMonthly.set(current.month, current);
 
-  if (mode !== "last3") {
-    return res.json({ current });
-  }
+  if (mode !== "last3") return res.json({ current });
 
   const m0 = account.month_key;
   const m1 = previousMonthKey(m0);
   const m2 = previousMonthKey(m1);
 
-  const last3 = [m0, m1, m2]
-    .map((m) => statsMonthly.get(m))
-    .filter(Boolean);
-
+  const last3 = [m0, m1, m2].map((m) => statsMonthly.get(m)).filter(Boolean);
   return res.json({ months: [m0, m1, m2], last3 });
 });
 
 /**
- * ============================
- *  ADMIN: agregar pack de fichas
- *  GET /admin/add-pack?key=ADMIN_KEY&packs=1
- * ============================
+ * ADMIN: agregar pack de fichas
+ * GET /admin/add-pack?key=ADMIN_KEY&packs=1
  */
 app.get("/admin/add-pack", (req, res) => {
   ensureMonthlyResetIfNeeded();
@@ -697,63 +890,8 @@ app.get("/admin/add-pack", (req, res) => {
 });
 
 /**
- * ============================
- *  ADMIN: ver pendientes SINPE
- *  GET /admin/pending-sinpe?key=ADMIN_KEY
- * ============================
- */
-app.get("/admin/pending-sinpe", (req, res) => {
-  ensureMonthlyResetIfNeeded();
-  if (!ADMIN_KEY || String(req.query.key || "") !== String(ADMIN_KEY)) return res.status(403).send("Forbidden");
-
-  const list = [];
-  for (const s of sessions.values()) {
-    if (s?.state === "ESPERANDO_SINPE" && s?.pending_sinpe?.status === "pending") {
-      list.push({
-        waId: s.waId,
-        expectedAmount: s.pending_sinpe.expectedAmount,
-        created_at: s.pending_sinpe.created_at,
-      });
-    }
-  }
-  return res.json({ ok: true, count: list.length, pending: list });
-});
-
-/**
- * ============================
- *  ADMIN: confirmar SINPE manual
- *  GET /admin/confirm-sinpe?key=ADMIN_KEY&waId=506XXXXXXXX&note=ok
- * ============================
- */
-app.get("/admin/confirm-sinpe", async (req, res) => {
-  ensureMonthlyResetIfNeeded();
-  if (!ADMIN_KEY || String(req.query.key || "") !== String(ADMIN_KEY)) return res.status(403).send("Forbidden");
-
-  const waId = String(req.query.waId || "").trim();
-  if (!waId) return res.status(400).json({ ok: false, error: "missing waId" });
-
-  const s = getSession(waId);
-  if (s.state !== "ESPERANDO_SINPE") {
-    return res.json({ ok: false, error: "not_waiting_sinpe", state: s.state });
-  }
-
-  s.pending_sinpe.status = "paid";
-  s.pending_sinpe.paid_at = new Date().toISOString();
-  s.state = "PAGO_CONFIRMADO";
-  account.metrics.sinpe_manual_confirmed += 1;
-
-  const note = String(req.query.note || "").trim();
-  await sendTelegram(`✅ SINPE confirmado MANUAL\nCliente: ${waId}${note ? `\nNota: ${note}` : ""}`);
-  await sendWhatsAppText(waId, `¡Listo! 🙌 Ya quedó confirmado el SINPE. En un toque te confirmamos el apartado y la entrega.`);
-
-  return res.json({ ok: true, waId });
-});
-
-/**
- * ============================
- *  ADMIN: crear QR 1-uso (post-pago)
- *  GET /admin/create-activation?key=ADMIN_KEY&email=cliente@correo.com
- * ============================
+ * ADMIN: crear QR 1-uso (post-pago)
+ * GET /admin/create-activation?key=ADMIN_KEY&email=cliente@correo.com
  */
 app.get("/admin/create-activation", (req, res) => {
   if (!ADMIN_KEY || String(req.query.key || "") !== String(ADMIN_KEY)) return res.status(403).send("Forbidden");
@@ -784,10 +922,8 @@ app.get("/admin/create-activation", (req, res) => {
 });
 
 /**
- * ============================
- *  ACTIVACIÓN 1-USO (QR)
- *  GET /activate/:token
- * ============================
+ * ACTIVACIÓN 1-USO (QR)
+ * GET /activate/:token
  */
 app.get("/activate/:token", (req, res) => {
   const token = String(req.params.token || "").trim();
@@ -833,9 +969,7 @@ app.get("/activate/:token", (req, res) => {
 });
 
 /**
- * ============================
- *  META: Verificación webhook
- * ============================
+ * META: Verificación webhook
  */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -850,247 +984,107 @@ app.get("/webhook", (req, res) => {
 });
 
 /**
- * ============================
- *  WHATSAPP INBOUND
- * ============================
+ * WHATSAPP INBOUND
  */
 app.post("/webhook", async (req, res) => {
-  ensureMonthlyResetIfNeeded();
+  try {
+    ensureMonthlyResetIfNeeded();
 
-  const msg = extractMessage(req.body);
-  if (!msg) return res.sendStatus(200);
+    const msg = extractMessage(req.body);
+    if (!msg) return res.sendStatus(200);
 
-  const { waId, type, text, imageId, caption } = msg;
-  account.metrics.chats_total += 1;
+    const { waId, type, text, imageId, caption } = msg;
 
-  const session = getSession(waId);
-  session.last_activity = Date.now();
-  resetCloseTimer(session);
+    account.metrics.chats_total += 1;
 
-  console.log("📩 WhatsApp:", { waId, type, text, imageId, caption, state: session.state });
-
-  /**
-   * Si estaba en PRECIO_ENVIADO y manda otra foto → nuevo caso
-   */
-  if (type === "image" && session.state === "PRECIO_ENVIADO") {
-    resetCaseForNewPhoto(session);
-    session.last_image_id = imageId;
-
-    await sendWhatsAppText(
-      waId,
-      `¡Pura vida! 🙌\n¿Te interesa ese otro? Decime talla, color o tamaño y te confirmo.`
-    );
-
-    const captionText = (caption || "").trim();
-    if (captionText && isMinimalDetail(captionText)) {
-      session.last_details_text = captionText;
-      session.sent_to_seller = true;
-      session.state = "ENVIADO_A_VENDEDOR";
-      account.metrics.quotes_requested += 1;
-
-      const waLink = `https://wa.me/${waId}`;
-      await sendTelegram(
-        `📦 Nueva consulta - ${STORE_NAME}
-
-👤 Cliente: ${waId}
-📝 Detalles: ${captionText}
-
-Respondé (respondiendo a ESTE mensaje):
-- 7000 2000   (precio envío)
-- NO          (no hay stock)
-
-👉 ${waLink}`
-      );
+    // Dueño manda comando al bot (por WhatsApp)
+    if (OWNER_WA_ID && waId === OWNER_WA_ID && type === "text") {
+      await handleOwnerCommand(text);
+      return res.sendStatus(200);
     }
 
-    return res.sendStatus(200);
-  }
+    // Cliente normal
+    const session = getSession(waId);
+    session.last_activity = Date.now();
+    resetCloseTimer(session);
 
-  /**
-   * 1) SALUDO
-   */
-  if (type === "text" && isGreeting(text)) {
-    if (!session.catalog_sent && CATALOG_URL) {
-      session.catalog_sent = true;
-      session.state = "CATALOGO_ENVIADO";
+    console.log("📩 WhatsApp:", { waId, type, text, imageId, caption, state: session.state });
+
+    // Si estaba en PRECIO_ENVIADO y manda otra foto -> nuevo caso
+    if (type === "image" && session.state === "PRECIO_ENVIADO") {
+      resetCaseForNewPhoto(session);
+      session.last_image_id = imageId;
+
       await sendWhatsAppText(
         waId,
-        `¡Hola! Pura vida 🙌 Qué gusto que nos escribís.\nAquí te dejo el catálogo: ${CATALOG_URL}\n\nSi algo te gusta, mandame la captura/foto y me decís talla, color o tamaño 👌`
+        `¡Pura vida! 🙌\n¿Te interesa ese otro? Decime talla, color o tamaño y te confirmo.`
       );
-    } else {
-      await sendWhatsAppText(
-        waId,
-        `¡Hola! 🙌 Mandame la captura/foto del producto y me decís talla, color o tamaño para ayudarte.`
-      );
-    }
-    return res.sendStatus(200);
-  }
 
-  /**
-   * 2) FOTO
-   */
-  if (type === "image") {
-    resetCaseForNewPhoto(session);
-    session.last_image_id = imageId;
-    session.sent_to_seller = false;
+      const captionText = (caption || "").trim();
+      if (captionText && isMinimalDetail(captionText)) {
+        session.last_details_text = captionText;
+        session.sent_to_owner = true;
+        session.state = "ENVIADO_A_DUENO";
+        account.metrics.quotes_requested += 1;
 
-    const captionText = (caption || "").trim();
+        await notifyOwner(
+          `📦 NUEVA CONSULTA - ${STORE_NAME}
+Cliente: ${waId}
+Detalle: ${captionText}
 
-    // Si caption ya trae detalle mínimo → enviar a vendedor
-    if (captionText && isMinimalDetail(captionText)) {
-      session.last_details_text = captionText;
-      session.sent_to_seller = true;
-      session.state = "ENVIADO_A_VENDEDOR";
-      account.metrics.quotes_requested += 1;
+Respondé con:
+Q ${waId} <precio> [envio]
+NO ${waId}`
+        );
+      }
 
-      await sendWhatsAppText(waId, `Dame un toque, voy a revisar si lo tenemos 👍`);
-
-      const waLink = `https://wa.me/${waId}`;
-      await sendTelegram(
-        `📦 Nueva consulta - ${STORE_NAME}
-
-👤 Cliente: ${waId}
-📝 Detalles: ${captionText}
-
-Respondé (respondiendo a ESTE mensaje):
-- 7000 2000   (precio envío)
-- NO          (no hay stock)
-
-👉 ${waLink}`
-      );
       return res.sendStatus(200);
     }
 
-    // Caption genérico → pedir detalle
-    session.state = "ESPERANDO_DETALLES";
-    await sendWhatsAppText(waId, msgAskDetails(session));
-    return res.sendStatus(200);
-  }
-
-  /**
-   * 3) TEXTO
-   */
-  if (type === "text") {
-    // 3A) SI/NO después de precio
-    if (session.state === "PRECIO_ENVIADO") {
-      if (isYes(text)) {
-        // consume ficha SOLO aquí
-        if (!consumeToken("INTENCION_SI")) {
-          await sendWhatsAppText(waId, msgOutOfTokens());
-          return res.sendStatus(200);
-        }
-
-        account.metrics.intent_yes += 1;
-        session.state = "INTENCION_CONFIRMADA";
-
-        if (STORE_TYPE === "fisica") {
-          await sendWhatsAppText(
-            waId,
-            `¡Buenísimo! 🙌\n¿Preferís envío o venir a recoger?\n\nRespondé:\n1) ENVÍO\n2) RECOGER`
-          );
-        } else {
-          await sendWhatsAppText(
-            waId,
-            `¡Buenísimo! 🙌\nPara enviártelo, pasame:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
-          );
-        }
-        return res.sendStatus(200);
-      }
-
-      if (isNo(text)) {
-        account.metrics.intent_no += 1;
-        session.state = "CERRADO_SIN_COSTO";
-        await sendWhatsAppText(waId, `Con gusto 🙌 Cualquier cosa aquí estamos.`);
-        return res.sendStatus(200);
-      }
-
-      await sendWhatsAppText(waId, `¿Te referís al producto anterior o al de la última foto? 🙌`);
-      return res.sendStatus(200);
-    }
-
-    // 3B) En tienda física: elegir ENVÍO o RECOGER
-    if (STORE_TYPE === "fisica" && session.state === "INTENCION_CONFIRMADA") {
-      const t = (text || "").trim().toLowerCase();
-
-      if (t.includes("1") || t.includes("envio") || t.includes("envío")) {
-        session.state = "PIDIENDO_DATOS_ENVIO";
+    // 1) Saludo
+    if (type === "text" && isGreeting(text)) {
+      if (!session.catalog_sent && CATALOG_URL) {
+        session.catalog_sent = true;
+        session.state = "CATALOGO_ENVIADO";
         await sendWhatsAppText(
           waId,
-          `Perfecto 🙌 Pasame:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
+          `¡Hola! Pura vida 🙌 Qué gusto que nos escribís.\nAquí te dejo el catálogo: ${CATALOG_URL}\n\nSi algo te gusta, mandame la captura/foto y me decís talla, color o tamaño 👌`
         );
-        return res.sendStatus(200);
-      }
-
-      if (t.includes("2") || t.includes("recoger") || t.includes("retiro") || t.includes("retirar")) {
-        // Para recoger: pedimos SINPE de previo
-        const expected = session.last_offer?.price ? Number(session.last_offer.price) : null;
-        setPendingSinpe(session, expected);
-
-        const sinpeLine = SINPE_NUMBER
-          ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}`
-          : `💳 SINPE: (configurar número)`;
-
+      } else {
         await sendWhatsAppText(
           waId,
-          `Listo 🙌 Para apartarlo y que lo tengamos listo para recoger, se paga por SINPE de previo.\n\n${sinpeLine}\n\nCuando lo hagás, me avisás por aquí y te confirmo.`
+          `¡Hola! 🙌 Mandame la captura/foto del producto y me decís talla, color o tamaño para ayudarte.`
         );
-
-        return res.sendStatus(200);
       }
-
-      await sendWhatsAppText(waId, `¿Me confirmás si querés 1) ENVÍO o 2) RECOGER? 🙌`);
       return res.sendStatus(200);
     }
 
-    // 3C) Si el cliente está en envío: armamos “resumen listo”
-    if (session.state === "PIDIENDO_DATOS_ENVIO") {
-      // Guardar texto como “datos” (simple MVP)
-      session.shipping_details = (text || "").trim();
-      session.state = "ENVIO_LISTO";
+    // 2) Foto
+    if (type === "image") {
+      resetCaseForNewPhoto(session);
+      session.last_image_id = imageId;
+      session.sent_to_owner = false;
 
-      const offer = session.last_offer || {};
-      const envioTxt = offer.shipping ? `Envío: ₡${offer.shipping}` : "Envío: (por definir)";
-      const precioTxt = offer.price ? `Precio: ₡${offer.price}` : "Precio: (pendiente)";
+      const captionText = (caption || "").trim();
 
-      await sendWhatsAppText(waId, `Perfecto 🙌 Ya casi. En un toque te confirmamos y te enviamos el detalle final.`);
-      await sendTelegram(
-        `📦 ENVÍO LISTO - ${STORE_NAME}
-
-👤 Cliente: ${waId}
-🧾 Datos: ${session.shipping_details || "(no capturado)"}
-
-${precioTxt}
-${envioTxt}
-
-👉 Abrir chat: https://wa.me/${waId}`
-      );
-
-      return res.sendStatus(200);
-    }
-
-    // 3D) Texto después de foto (detalles mínimos)
-    if (session.last_image_id && !session.sent_to_seller) {
-      if (isMinimalDetail(text)) {
-        session.last_details_text = text;
-        session.sent_to_seller = true;
-        session.state = "ENVIADO_A_VENDEDOR";
+      if (captionText && isMinimalDetail(captionText)) {
+        session.last_details_text = captionText;
+        session.sent_to_owner = true;
+        session.state = "ENVIADO_A_DUENO";
         account.metrics.quotes_requested += 1;
 
         await sendWhatsAppText(waId, `Dame un toque, voy a revisar si lo tenemos 👍`);
 
-        const waLink = `https://wa.me/${waId}`;
-        await sendTelegram(
-          `📦 Nueva consulta - ${STORE_NAME}
+        await notifyOwner(
+          `📦 NUEVA CONSULTA - ${STORE_NAME}
+Cliente: ${waId}
+Detalle: ${captionText}
 
-👤 Cliente: ${waId}
-📝 Detalles: ${text}
-
-Respondé (respondiendo a ESTE mensaje):
-- 7000 2000   (precio envío)
-- NO          (no hay stock)
-
-👉 ${waLink}`
+Respondé con:
+Q ${waId} <precio> [envio]
+NO ${waId}`
         );
+
         return res.sendStatus(200);
       }
 
@@ -1099,145 +1093,209 @@ Respondé (respondiendo a ESTE mensaje):
       return res.sendStatus(200);
     }
 
-    // 3E) FAQ básico
-    const low = (text || "").toLowerCase();
+    // 3) Texto
+    if (type === "text") {
+      // SI/NO después de precio
+      if (session.state === "PRECIO_ENVIADO") {
+        if (isYes(text)) {
+          // consume ficha SOLO aquí
+          if (!consumeToken("INTENCION_SI")) {
+            await sendWhatsAppText(waId, msgOutOfTokens());
+            return res.sendStatus(200);
+          }
 
-    if (low.includes("horario") || low.includes("abren") || low.includes("cierran")) {
-      await sendWhatsAppText(waId, `🕘 Horario: ${HOURS_DAY}`);
-      return res.sendStatus(200);
-    }
+          account.metrics.intent_yes += 1;
+          session.state = "INTENCION_CONFIRMADA";
 
-    if (low.includes("ubic") || low.includes("donde") || low.includes("direc")) {
-      if (STORE_TYPE === "fisica" && MAPS_URL) {
-        await sendWhatsAppText(waId, `📍 Ubicación: ${MAPS_URL}`);
-      } else {
-        await sendWhatsAppText(waId, `Somos tienda virtual 🙌 Mandame la captura/foto del producto y te ayudo con gusto.`);
+          await sendWhatsAppText(
+            waId,
+            STORE_TYPE === "fisica"
+              ? `¡Buenísimo! 🙌\n¿Preferís envío o venir a recoger?\n\nRespondé:\n1) ENVÍO\n2) RECOGER`
+              : `¡Buenísimo! 🙌\nPara enviártelo, pasame:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
+          );
+          return res.sendStatus(200);
+        }
+
+        if (isNo(text)) {
+          account.metrics.intent_no += 1;
+          session.state = "CERRADO_SIN_COSTO";
+          await sendWhatsAppText(waId, `Con gusto 🙌 Cualquier cosa aquí estamos.`);
+          return res.sendStatus(200);
+        }
+
+        await sendWhatsAppText(waId, `¿Te referís al producto anterior o al de la última foto? 🙌`);
+        return res.sendStatus(200);
       }
+
+      // En tienda física: elegir ENVÍO o RECOGER
+      if (STORE_TYPE === "fisica" && session.state === "INTENCION_CONFIRMADA") {
+        const t = (text || "").trim().toLowerCase();
+
+        if (t.includes("1") || t.includes("envio") || t.includes("envío")) {
+          session.state = "PIDIENDO_DATOS_ENVIO";
+          await sendWhatsAppText(
+            waId,
+            `Perfecto 🙌 Pasame:\n- Nombre completo\n- Dirección exacta\n- Teléfono\n\nY te confirmo el envío 👌`
+          );
+          return res.sendStatus(200);
+        }
+
+        if (t.includes("2") || t.includes("recoger") || t.includes("retiro") || t.includes("retirar")) {
+          const expected = session.last_offer?.price ? Number(session.last_offer.price) : null;
+          setPendingSinpe(session, expected);
+
+          const sinpeLine = SINPE_NUMBER
+            ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}`
+            : `💳 SINPE: (configurar número)`;
+
+          await sendWhatsAppText(
+            waId,
+            `Listo 🙌 Para apartarlo y que lo tengamos listo para recoger, se paga por SINPE de previo.\n\n${sinpeLine}\n\nCuando lo hagás, me avisás por aquí y te confirmo.`
+          );
+
+          await notifyOwner(
+            `💳 Cliente esperando SINPE
+Cliente: ${waId}
+Monto esperado: ${expected || "?"}
+
+Podés confirmar manual:
+CONFIRM ${waId} ok
+
+O ver pendientes:
+PEND`
+          );
+
+          return res.sendStatus(200);
+        }
+
+        await sendWhatsAppText(waId, `¿Me confirmás si querés 1) ENVÍO o 2) RECOGER? 🙌`);
+        return res.sendStatus(200);
+      }
+
+      // Capturar datos de envío (si aplica)
+      if (session.state === "PIDIENDO_DATOS_ENVIO") {
+        session.shipping_details = (text || "").trim();
+        session.state = "ENVIO_LISTO";
+
+        const offer = session.last_offer || {};
+        const envioTxt = offer.shipping ? `Envío: ₡${offer.shipping}` : "Envío: (por definir)";
+        const precioTxt = offer.price ? `Precio: ₡${offer.price}` : "Precio: (pendiente)";
+
+        await sendWhatsAppText(waId, `Perfecto 🙌 Ya casi. En un toque te confirmamos y te enviamos el detalle final.`);
+        await notifyOwner(
+          `📦 ENVÍO LISTO - ${STORE_NAME}
+Cliente: ${waId}
+Datos: ${session.shipping_details || "(no capturado)"}
+
+${precioTxt}
+${envioTxt}`
+        );
+
+        return res.sendStatus(200);
+      }
+
+      // Texto después de foto (detalles)
+      if (session.last_image_id && !session.sent_to_owner) {
+        if (isMinimalDetail(text)) {
+          session.last_details_text = text;
+          session.sent_to_owner = true;
+          session.state = "ENVIADO_A_DUENO";
+          account.metrics.quotes_requested += 1;
+
+          await sendWhatsAppText(waId, `Dame un toque, voy a revisar si lo tenemos 👍`);
+
+          await notifyOwner(
+            `📦 NUEVA CONSULTA - ${STORE_NAME}
+Cliente: ${waId}
+Detalle: ${text}
+
+Respondé con:
+Q ${waId} <precio> [envio]
+NO ${waId}`
+          );
+          return res.sendStatus(200);
+        }
+
+        session.state = "ESPERANDO_DETALLES";
+        await sendWhatsAppText(waId, msgAskDetails(session));
+        return res.sendStatus(200);
+      }
+
+      // FAQ rápido
+      const low = (text || "").toLowerCase();
+
+      if (low.includes("horario") || low.includes("abren") || low.includes("cierran")) {
+        await sendWhatsAppText(waId, `🕘 Horario: ${HOURS_DAY}`);
+        return res.sendStatus(200);
+      }
+
+      if (low.includes("ubic") || low.includes("donde") || low.includes("direc")) {
+        if (STORE_TYPE === "fisica" && MAPS_URL) {
+          await sendWhatsAppText(waId, `📍 Ubicación: ${MAPS_URL}`);
+        } else {
+          await sendWhatsAppText(waId, `Somos tienda virtual 🙌 Mandame la captura/foto del producto y te ayudo con gusto.`);
+        }
+        return res.sendStatus(200);
+      }
+
+      if (low.includes("precio") || low.includes("cuanto") || low.includes("disponible") || low.includes("tienen")) {
+        await sendWhatsAppText(waId, `Listo 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para confirmarte.`);
+        return res.sendStatus(200);
+      }
+
+      await sendWhatsAppText(waId, `Dale 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para ayudarte.`);
       return res.sendStatus(200);
     }
 
-    if (low.includes("precio") || low.includes("cuanto") || low.includes("disponible") || low.includes("tienen")) {
-      await sendWhatsAppText(
-        waId,
-        `Listo 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para confirmarte.`
-      );
-      return res.sendStatus(200);
-    }
-
-    // Default
-    await sendWhatsAppText(
-      waId,
-      `Dale 🙌 Mandame la foto/captura del producto y me decís talla, color o tamaño para ayudarte.`
-    );
+    return res.sendStatus(200);
+  } catch (e) {
+    console.log("❌ Error en /webhook:", e?.message || e);
     return res.sendStatus(200);
   }
-
-  return res.sendStatus(200);
 });
 
 /**
  * ============================
- *  TELEGRAM INBOUND (vendedor)
+ *  SINPE SMS (PRO) - GET por query
+ *  GET /sinpe-sms?secret=XXX&msg=...&time=...&from=...
+ *
+ *  - "from" es OPCIONAL (si no viene, usamos "SINPE SMS")
+ *  - Para tu app: si solo permite msg, perfecto.
  * ============================
  */
-app.post("/telegram", async (req, res) => {
-  try {
-    ensureMonthlyResetIfNeeded();
-
-    if (TELEGRAM_SECRET_TOKEN) {
-      const header = req.headers["x-telegram-bot-api-secret-token"];
-      if (header !== TELEGRAM_SECRET_TOKEN) return res.sendStatus(403);
-    }
-
-    const update = req.body;
-    const msg = update?.message;
-    if (!msg) return res.sendStatus(200);
-
-    const waId = extractWaIdFromTelegramUpdate(update);
-    if (!waId) return res.sendStatus(200);
-
-    const session = getSession(waId);
-    resetCloseTimer(session);
-
-    const sellerText = msg.text || msg.caption || "";
-    console.log("📨 Telegram:", { waId, sellerText, state: session.state });
-
-    if (session.state !== "ENVIADO_A_VENDEDOR") return res.sendStatus(200);
-
-    const parsed = parseSellerReplyFromTelegramText(sellerText);
-
-    if (parsed.type === "NO_STOCK") {
-      account.metrics.no_stock += 1;
-      session.state = "CERRADO_SIN_COSTO";
-      session.sent_to_seller = false;
-      session.last_offer = null;
-
-      await sendWhatsAppText(waId, `Gracias por esperar 🙌 En este momento no tenemos disponibilidad de ese producto.`);
-      return res.sendStatus(200);
-    }
-
-    if (parsed.type === "PRICE") {
-      account.metrics.quotes_sent += 1;
-
-      session.state = "PRECIO_ENVIADO";
-      session.sent_to_seller = false;
-      session.last_offer = { price: parsed.price, shipping: parsed.shipping };
-
-      const envioTxt = parsed.shipping ? ` + envío ₡${parsed.shipping}` : "";
-      await sendWhatsAppText(
-        waId,
-        `¡Sí lo tenemos! 🎉\nTe sale en ₡${parsed.price}${envioTxt}.\n\n¿Te interesa comprarlo?\nRespondé:\nSI → para continuar\nNO → si solo estás viendo`
-      );
-      return res.sendStatus(200);
-    }
-
-    await sendTelegram(
-      `⚠️ No entendí tu respuesta.\n\nUsá este formato (respondiendo al mensaje del cliente):\n- 7000 2000   (precio envío)\n- NO          (no hay stock)`
-    );
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.log("❌ Error en /telegram:", err);
-    return res.sendStatus(200);
-  }
-});
-
-/**
- * ============================
- *  SINPE SMS (PRO) - Webhook
- *  POST /sinpe-sms
- *  Header: x-sinpe-secret: <SINPE_SMS_SECRET>
- *  Body: { from, body, received_at? }
- * ============================
- */
-app.post("/sinpe-sms", async (req, res) => {
+app.get("/sinpe-sms", async (req, res) => {
   try {
     ensureMonthlyResetIfNeeded();
 
     if (!SINPE_SMS_SECRET) return res.status(400).send("SINPE_SMS_SECRET no configurado");
-    const header = String(req.headers["x-sinpe-secret"] || "");
-    if (header !== SINPE_SMS_SECRET) return res.status(403).send("Forbidden");
 
-    const from = String(req.body?.from || "SINPE SMS");
-    const body = String(req.body?.body || "");
-    const received_at = String(req.body?.received_at || new Date().toISOString());
+    const secret = String(req.query.secret || "");
+    if (secret !== SINPE_SMS_SECRET) return res.status(403).send("Forbidden");
+
+    const from = String(req.query.from || "SINPE SMS");
+    const msg = String(req.query.msg || "");
+    const time = String(req.query.time || new Date().toISOString());
+
+    if (!msg) return res.status(400).json({ ok: false, error: "missing msg" });
 
     account.metrics.sinpe_sms_received += 1;
 
-    const parsed = parseSinpeSms(body);
+    const parsed = parseSinpeSms(msg);
 
-    // 1) siempre avisar Telegram (auditoría)
-    await sendTelegram(
-      `💳 SINPE SMS detectado - ${STORE_NAME}\n\n` +
-      `🏷️ Origen: ${from}\n` +
-      `🕒 Recibido: ${received_at}\n` +
-      `💰 Monto: ${parsed.amount ? `₡${parsed.amount}` : "No detectado"}\n` +
-      `${parsed.payer ? `👤 De: ${parsed.payer}\n` : ""}` +
-      `${parsed.reference ? `🔢 Ref: ${parsed.reference}\n` : ""}\n` +
-      `🧾 Texto:\n${parsed.raw}`
+    // Auditoría al dueño (WhatsApp)
+    await notifyOwner(
+      `💳 SINPE SMS - ${STORE_NAME}
+Origen: ${from}
+Hora: ${time}
+Monto: ${parsed.amount ? `₡${parsed.amount}` : "No detectado"}
+${parsed.payer ? `De: ${parsed.payer}` : ""}
+${parsed.reference ? `Ref: ${parsed.reference}` : ""}
+
+Texto:
+${parsed.raw}`
     );
 
-    // 2) auto-match solo si hay monto
+    // Auto-match solo si hay monto detectado
     if (!parsed.amount) return res.json({ ok: true, matched: false, reason: "no_amount" });
 
     const lookbackMs = minutesAgoMs(SINPE_SMS_LOOKBACK_MIN);
@@ -1249,9 +1307,7 @@ app.post("/sinpe-sms", async (req, res) => {
         if (createdMs < lookbackMs) continue;
 
         const expected = Number(s.pending_sinpe.expectedAmount || 0);
-        if (expected && expected === parsed.amount) {
-          candidates.push(s);
-        }
+        if (expected && expected === parsed.amount) candidates.push(s);
       }
     }
 
@@ -1268,16 +1324,14 @@ app.post("/sinpe-sms", async (req, res) => {
         `¡Listo! 🙌 Ya nos entró el SINPE. En un toque te confirmamos que quedó apartado y listo para recoger.`
       );
 
-      await sendTelegram(
-        `✅ PAGO AUTO-CONFIRMADO\nCliente: ${s.waId}\nMonto: ₡${parsed.amount}\n${parsed.payer ? `De: ${parsed.payer}\n` : ""}${parsed.reference ? `Ref: ${parsed.reference}\n` : ""}`
-      );
+      await notifyOwner(`✅ PAGO AUTO-CONFIRMADO\nCliente: ${s.waId}\nMonto: ₡${parsed.amount}`);
 
       return res.json({ ok: true, matched: true, waId: s.waId });
     }
 
     if (candidates.length > 1) {
-      await sendTelegram(
-        `⚠️ SINPE monto ₡${parsed.amount} calza con ${candidates.length} pedidos en espera.\nNo se confirmó automático. Confirmá manual si hace falta.`
+      await notifyOwner(
+        `⚠️ SINPE ₡${parsed.amount} calza con ${candidates.length} pedidos.\nNo se confirmó automático. Usá PEND y CONFIRM manual.`
       );
       return res.json({ ok: true, matched: false, reason: "multiple_candidates", count: candidates.length });
     }
@@ -1295,22 +1349,26 @@ app.post("/sinpe-sms", async (req, res) => {
  * ============================
  */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+
+app.listen(PORT, async () => {
   const base = BASE_URL ? BASE_URL.replace(/\/$/, "") : "(set BASE_URL)";
   console.log("🚀 TICO-bot corriendo en puerto", PORT);
-  console.log("✅ Endpoints completos:");
+  console.log("✅ Endpoints:");
   console.log(`- Home: ${base}/`);
-  console.log(`- Meta webhook: ${base}/webhook`);
-  console.log(`- Telegram webhook: ${base}/telegram`);
+  console.log(`- Meta verify/inbound: ${base}/webhook`);
   console.log(`- Status: ${base}/status?key=ADMIN_KEY`);
-  console.log(`- Report (mes): ${base}/admin/report?key=ADMIN_KEY`);
-  console.log(`- Report (últimos 3): ${base}/admin/report?key=ADMIN_KEY&mode=last3`);
+  console.log(`- Report: ${base}/admin/report?key=ADMIN_KEY`);
+  console.log(`- Report3: ${base}/admin/report?key=ADMIN_KEY&mode=last3`);
   console.log(`- Add pack: ${base}/admin/add-pack?key=ADMIN_KEY&packs=1`);
-  console.log(`- Crear activación: ${base}/admin/create-activation?key=ADMIN_KEY&email=cliente@correo.com`);
-  console.log(`- SINPE SMS (PRO): ${base}/sinpe-sms`);
-  console.log(`- Pendientes SINPE: ${base}/admin/pending-sinpe?key=ADMIN_KEY`);
-  console.log(`- Confirmar SINPE: ${base}/admin/confirm-sinpe?key=ADMIN_KEY&waId=506XXXXXXXX`);
+  console.log(`- Create activation: ${base}/admin/create-activation?key=ADMIN_KEY&email=cliente@correo.com`);
+  console.log(`- SINPE SMS (GET): ${base}/sinpe-sms?secret=...&msg=...&time=...&from=...`);
+  console.log("✅ WhatsApp owner:", OWNER_WA_ID ? `OK (${OWNER_WA_ID})` : "NO (set OWNER_WA_ID)");
+  if (OWNER_WA_ID) {
+    // mensaje inicial para que el dueño sepa que ya está vivo
+    await notifyOwner(`✅ ${STORE_NAME} activo.\nEscribí HELP para ver comandos.`);
+  }
 });
+
 
 
 
