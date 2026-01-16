@@ -242,6 +242,7 @@ function getSession(waId) {
       pending_sinpe: null,
       shipping_details: null,
       sinpe_reference: null,
+      client_zone: null,
     });
     account.metrics.new_contacts += 1;
   }
@@ -287,6 +288,7 @@ function resetCase(session) {
   session.pending_sinpe = null;
   session.shipping_details = null;
   session.sinpe_reference = null;
+  session.client_zone = null;
   removePendingQuote(session.waId);
 }
 
@@ -851,19 +853,33 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // PRECIO
-    if (cmd.type === "PRECIO") {
+    // PRECIO (solo producto, sin envío aún)
+    if (cmd.type === "PRECIO" && !cmd.shipping) {
       account.metrics.quotes_sent += 1;
-      clientSession.state = "PRECIO_ENVIADO";
-      clientSession.last_offer = { price: cmd.price, shipping: cmd.shipping };
+      clientSession.state = "ESPERANDO_ZONA";
+      clientSession.last_offer = { price: cmd.price, shipping: null };
       removePendingQuote(cmd.clientWaId);
-
-      const shipText = cmd.shipping ? ` (+ envío ₡${cmd.shipping.toLocaleString()})` : "";
       
       await sendWhatsApp(cmd.clientWaId, 
-        `${frase("si_hay")}\n\nPrecio: ₡${cmd.price.toLocaleString()}${shipText}\n\n¿Te interesa?\n👉 SI = Lo quiero\n👉 NO = Solo viendo`
+        `${frase("si_hay")}\n\nPrecio: ₡${cmd.price.toLocaleString()}\n\n¿De dónde nos escribís? (escriba el lugar donde vive)`
       );
-      await sendWhatsApp(waId, `✅ Precio enviado a ${cmd.clientWaId}`);
+      await sendWhatsApp(waId, `✅ Precio enviado a ${cmd.clientWaId}. Esperando zona para calcular envío.`);
+      
+      if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
+
+    // PRECIO TOTAL (producto + envío ya calculado)
+    if (cmd.type === "PRECIO" && cmd.shipping !== null) {
+      clientSession.state = "PRECIO_TOTAL_ENVIADO";
+      clientSession.last_offer = { price: cmd.price, shipping: cmd.shipping };
+      
+      const total = cmd.price + cmd.shipping;
+      
+      await sendWhatsApp(cmd.clientWaId, 
+        `Perfecto 🙌\n\nProducto: ₡${cmd.price.toLocaleString()}\nEnvío: ₡${cmd.shipping.toLocaleString()}\nTotal: ₡${total.toLocaleString()}\n\n¿Te interesa?\n👉 SI = Me interesa\n👉 NO = Solo estoy viendo\n\nSi te interesa, ¿cómo lo querés?\n👉 ENVÍO = Te lo enviamos\n👉 RECOGER = Pasás a tienda`
+      );
+      await sendWhatsApp(waId, `✅ Precio total enviado a ${cmd.clientWaId}`);
       
       if (SESSIONS_PERSIST) saveSessionsToDisk();
       return res.sendStatus(200);
@@ -1049,7 +1065,108 @@ app.post("/webhook", async (req, res) => {
   // Texto
   if (type === "text") {
 
-    // PRECIO_ENVIADO: cliente dice SI/NO
+    // ESPERANDO_ZONA: cliente dice de dónde es
+    if (session.state === "ESPERANDO_ZONA") {
+      session.client_zone = text.trim();
+      session.state = "ZONA_RECIBIDA";
+      
+      const price = session.last_offer?.price || 0;
+      
+      // Notificar al dueño para que calcule envío
+      await notifyOwner(
+        `📍 ZONA RECIBIDA\n📱 ${waId}\n📍 Zona: ${session.client_zone}\n💰 Producto: ₡${price.toLocaleString()}\n\n→ Respondé: ${waId} ${price}-[envío]`
+      );
+      
+      await sendWhatsApp(waId, `¡Gracias! 🙌 Ya te confirmo el costo de envío...`);
+      
+      if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
+
+    // PRECIO_TOTAL_ENVIADO: cliente dice SI+ENVÍO, SI+RECOGER, o NO
+    if (session.state === "PRECIO_TOTAL_ENVIADO") {
+      const low = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      
+      // Cliente dice NO / solo viendo
+      if (low.includes("no") || low.includes("solo") || low.includes("viendo") || low.includes("luego")) {
+        account.metrics.intent_no += 1;
+        session.state = "CERRADO_SIN_INTERES";
+        await sendWhatsApp(waId, fraseNoRepetir("no_quiere", waId));
+        return res.sendStatus(200);
+      }
+      
+      // Cliente quiere ENVÍO
+      if (low.includes("envio") || low.includes("enviar") || low.includes("enviame") || low.includes("envíe")) {
+        if (!consumeToken("INTENCION_SI")) {
+          await sendWhatsApp(waId, msgOutOfTokens());
+          return res.sendStatus(200);
+        }
+        
+        account.metrics.intent_yes += 1;
+        account.metrics.delivery_envio += 1;
+        session.delivery_method = "envio";
+        session.state = "PIDIENDO_DATOS";
+        
+        const price = session.last_offer?.price || 0;
+        const ship = session.last_offer?.shipping || 0;
+        const total = price + ship;
+        const sinpe = SINPE_NUMBER ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}` : "";
+        
+        await sendWhatsApp(waId, 
+          `¡Perfecto! 🙌\n\n${sinpe}\nTotal: ₡${total.toLocaleString()}\n\nPorfa pasame estos datos y el comprobante del SINPE:\n\n👤 Nombre completo:\n📍 Provincia:\n📍 Cantón:\n📍 Distrito:\n📍 Otras señas:\n📞 Teléfono:\n\n⚠️ En la descripción del SINPE poné tu nombre`
+        );
+        await notifyIntentConfirmed(session);
+        if (SESSIONS_PERSIST) saveSessionsToDisk();
+        return res.sendStatus(200);
+      }
+      
+      // Cliente quiere RECOGER
+      if (low.includes("recoger") || low.includes("tienda") || low.includes("retiro") || low.includes("paso")) {
+        if (!consumeToken("INTENCION_SI")) {
+          await sendWhatsApp(waId, msgOutOfTokens());
+          return res.sendStatus(200);
+        }
+        
+        account.metrics.intent_yes += 1;
+        account.metrics.delivery_recoger += 1;
+        session.delivery_method = "recoger";
+        session.state = "PIDIENDO_DATOS_RECOGER";
+        
+        const price = session.last_offer?.price || 0;
+        session.pending_sinpe = { expectedAmount: price, status: "pending", created_ms: Date.now() };
+        
+        const sinpe = SINPE_NUMBER ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}` : "";
+        
+        let ubicacion = "";
+        if (STORE_ADDRESS) {
+          ubicacion = `\n\n📍 Dirección: ${STORE_ADDRESS}`;
+          if (MAPS_URL) {
+            ubicacion += `\n🗺️ Mapa: ${MAPS_URL}`;
+          }
+        }
+        
+        const horario = `Lunes a Sábado de ${HOURS_START}am a ${HOURS_END > 12 ? HOURS_END - 12 : HOURS_END}pm`;
+        
+        await sendWhatsApp(waId, 
+          `¡Perfecto! 🙌\n\nPodés recogerlo en nuestra tienda ${horario}.${ubicacion}\n\nTotal: ₡${price.toLocaleString()} (sin envío)\n\n${sinpe}\n\nPorfa pasame estos datos y el comprobante del SINPE:\n\n👤 Nombre completo:\n🪪 Cédula:\n\n⚠️ En la descripción del SINPE poné tu nombre`
+        );
+        await notifyIntentConfirmed(session);
+        if (SESSIONS_PERSIST) saveSessionsToDisk();
+        return res.sendStatus(200);
+      }
+      
+      // Si dice solo "SI" sin especificar método
+      if (low === "si" || low === "sí" || low === "dale" || low === "va" || low === "claro") {
+        await sendWhatsApp(waId, `¿Cómo lo querés?\n👉 ENVÍO = Te lo enviamos\n👉 RECOGER = Pasás a tienda`);
+        return res.sendStatus(200);
+      }
+      
+      // No entendió
+      await sendWhatsApp(waId, `¿Te interesa?\n👉 SI + ENVÍO = Te lo enviamos\n👉 SI + RECOGER = Pasás a tienda\n👉 NO = Solo estoy viendo`);
+      return res.sendStatus(200);
+    }
+
+    // PRECIO_ENVIADO: (estado legacy, por si quedó alguna conversación vieja)
     if (session.state === "PRECIO_ENVIADO") {
       if (isYes(text)) {
         if (!consumeToken("INTENCION_SI")) {
@@ -1125,24 +1242,24 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // PIDIENDO_DATOS: recibir dirección
+    // PIDIENDO_DATOS: recibir datos de envío + comprobante
     if (session.state === "PIDIENDO_DATOS") {
       session.shipping_details = text.trim();
-
-      const price = session.last_offer?.price || 0;
-      const ship = session.last_offer?.shipping || 0;
-      const total = price + ship;
-      const ref = generateSinpeReference(waId);
-      
-      session.sinpe_reference = ref;
       session.state = "ESPERANDO_SINPE";
-      session.pending_sinpe = { expectedAmount: total, status: "pending", created_ms: Date.now() };
 
-      const sinpe = SINPE_NUMBER ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}` : "";
-      const shipText = ship > 0 ? `\nEnvío: ₡${ship.toLocaleString()}` : "";
+      await sendWhatsApp(waId, `¡Recibido! 🙌 Estamos verificando el pago. En un momento te confirmamos.`);
+      await notifyPaymentClaim(session);
+      if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
 
-      await sendWhatsApp(waId, `¡Perfecto! 🙌\n\nProducto: ₡${price.toLocaleString()}${shipText}\nTotal: ₡${total.toLocaleString()}\n\n${sinpe}\n\n⚠️ Poné de descripción: ${ref}\n\nCuando pagues, escribí "listo" 👌`);
-      await notifyIntentConfirmed(session);
+    // PIDIENDO_DATOS_RECOGER: recibir nombre, cédula + comprobante
+    if (session.state === "PIDIENDO_DATOS_RECOGER") {
+      session.shipping_details = text.trim(); // nombre + cédula
+      session.state = "ESPERANDO_SINPE";
+
+      await sendWhatsApp(waId, `¡Recibido! 🙌 Estamos verificando el pago. En un momento te confirmamos.`);
+      await notifyPaymentClaim(session);
       if (SESSIONS_PERSIST) saveSessionsToDisk();
       return res.sendStatus(200);
     }
