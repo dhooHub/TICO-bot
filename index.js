@@ -1,3 +1,4 @@
+
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -35,6 +36,13 @@ const HOURS_DAY = process.env.HOURS_DAY || `${HOURS_START}am-${HOURS_END > 12 ? 
 const SINPE_NUMBER = process.env.SINPE_NUMBER || "";
 const SINPE_NAME = process.env.SINPE_NAME || "";
 
+// FAQ Configurables
+const SHIPPING_GAM = process.env.SHIPPING_GAM || "₡2,500";
+const SHIPPING_RURAL = process.env.SHIPPING_RURAL || "₡3,500";
+const DELIVERY_DAYS = process.env.DELIVERY_DAYS || "8 días hábiles";
+const WARRANTY_DAYS = process.env.WARRANTY_DAYS || "30 días contra defectos de fábrica";
+const NO_PHOTOS_MSG = process.env.NO_PHOTOS_MSG || "";  // Respuesta personalizada cuando piden fotos
+
 // Plan / Fichas
 const MONTHLY_TOKENS = Number(process.env.MONTHLY_TOKENS || 100);
 const PACK_TOKENS = Number(process.env.PACK_TOKENS || 10);
@@ -43,6 +51,9 @@ const PACK_PRICE_CRC = Number(process.env.PACK_PRICE_CRC || 1000);
 // Admin
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
 const BASE_URL = process.env.BASE_URL || "";
+
+// OpenAI (IA conversacional)
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 // Persistencia
 const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1";
@@ -577,6 +588,9 @@ function isNo(text) {
  *    506XXXX 0           → no hay
  *    506XXXX no          → no hay
  *    506XXXX pagado      → confirmar pago
+ *    506XXXX pausa       → pausar bot para ese cliente
+ *    506XXXX bot         → reanudar bot para ese cliente
+ *    506XXXX cat         → enviar catálogo al cliente
  * ============================
  */
 function parseOwnerCommand(text) {
@@ -599,6 +613,21 @@ function parseOwnerCommand(text) {
   // No hay stock
   if (cmd === "0" || cmd === "no" || cmd === "nohay" || cmd === "agotado") {
     return { type: "NO_HAY", clientWaId: clientNum };
+  }
+  
+  // PAUSA - desactivar bot para ese cliente
+  if (cmd === "pausa" || cmd === "pausar" || cmd === "stop") {
+    return { type: "PAUSA", clientWaId: clientNum };
+  }
+  
+  // BOT - reanudar bot para ese cliente
+  if (cmd === "bot" || cmd === "reanudar" || cmd === "activar") {
+    return { type: "REANUDAR", clientWaId: clientNum };
+  }
+  
+  // CAT - enviar catálogo al cliente
+  if (cmd === "cat" || cmd === "catalogo" || cmd === "catálogo") {
+    return { type: "CATALOGO", clientWaId: clientNum };
   }
   
   // Precio: 5000 o 5000-2000
@@ -670,6 +699,226 @@ async function sendWhatsApp(toWaId, bodyText) {
 
 /**
  * ============================
+ *  IA CONVERSACIONAL (OpenAI)
+ * ============================
+ */
+
+// IA para interpretar mensajes del DUEÑO
+async function aiInterpretOwner(text, pendingClients) {
+  if (!OPENAI_API_KEY) return null;
+  
+  const pendingList = pendingClients.length > 0 
+    ? pendingClients.map(p => p.waId).join(", ")
+    : "ninguno";
+  
+  const prompt = `Sos un intérprete de comandos para un sistema de ventas WhatsApp.
+El vendedor escribe mensajes informales y vos los convertís a comandos.
+
+Clientes pendientes de respuesta: ${pendingList}
+${pendingClients.length === 1 ? `(Si no menciona número, asumí que es para: ${pendingClients[0].waId})` : ""}
+
+El vendedor escribió: "${text}"
+
+Interpretá y respondé SOLO en JSON:
+{
+  "comando": "PRECIO|NO_HAY|PAGADO|PAUSA|REANUDAR|CATALOGO|SALDO|AYUDA|NONE",
+  "cliente": "número del cliente o null",
+  "precio": número o null,
+  "envio": número o null,
+  "mensaje_directo": "si quiere mandar mensaje directo al cliente, ponerlo aquí, sino null"
+}
+
+Ejemplos:
+- "si hay 12 mil" → {"comando":"PRECIO","cliente":"${pendingClients[0]?.waId || "50688881234"}","precio":12000,"envio":null,"mensaje_directo":null}
+- "15000 con envío 2500" → {"comando":"PRECIO","cliente":"...","precio":15000,"envio":2500,"mensaje_directo":null}
+- "no tengo" o "agotado" → {"comando":"NO_HAY","cliente":"...","precio":null,"envio":null,"mensaje_directo":null}
+- "ya pagó" o "confirmado" → {"comando":"PAGADO","cliente":"...","precio":null,"envio":null,"mensaje_directo":null}
+- "yo le hablo" o "pausa" → {"comando":"PAUSA","cliente":"...","precio":null,"envio":null,"mensaje_directo":null}
+- "activar bot" → {"comando":"REANUDAR","cliente":"...","precio":null,"envio":null,"mensaje_directo":null}
+- "mandále el catálogo" → {"comando":"CATALOGO","cliente":"...","precio":null,"envio":null,"mensaje_directo":null}
+- "cuántas fichas tengo" → {"comando":"SALDO","cliente":null,"precio":null,"envio":null,"mensaje_directo":null}
+- "decile que mañana le confirmo" → {"comando":"NONE","cliente":"...","precio":null,"envio":null,"mensaje_directo":"Mañana te confirmo 🙌"}
+
+Solo respondé el JSON, nada más.`;
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+        max_tokens: 200
+      })
+    });
+
+    if (!resp.ok) {
+      console.log("⚠️ OpenAI error:", resp.status);
+      return null;
+    }
+
+    const data = await resp.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    
+    // Limpiar y parsear JSON
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    return null;
+  } catch (e) {
+    console.log("⚠️ AI Owner error:", e?.message);
+    return null;
+  }
+}
+
+// IA para generar respuestas al CLIENTE
+async function aiDraftReply(waId, text, session, hasImage) {
+  if (!OPENAI_API_KEY) return null;
+
+  const stateDescriptions = {
+    "NEW": "Cliente nuevo, primera interacción",
+    "ESPERANDO_DETALLES": "Esperando que diga talla/color/tamaño",
+    "ESPERANDO_RESPUESTA_DUENO": "Esperando que el dueño confirme precio",
+    "ESPERANDO_ZONA": "Esperando que diga de dónde es para calcular envío",
+    "PRECIO_ENVIADO": "Ya le mandamos precio, esperando SI/NO",
+    "ESPERANDO_METODO": "Esperando si quiere ENVÍO o RECOGER",
+    "ESPERANDO_DATOS_ENVIO": "Esperando dirección completa",
+    "ESPERANDO_SINPE": "Esperando que pague por SINPE",
+    "LEAD_NOCTURNO": "Es de noche, ya le dijimos que mañana contactamos"
+  };
+
+  const systemPrompt = `Sos un asistente de ventas para una tienda en Costa Rica. Hablás español tico natural.
+
+REGLAS ESTRICTAS:
+- NUNCA inventés precios ni confirmés stock
+- NUNCA digás "el precio es X" a menos que esté en last_offer
+- Si falta talla/color: pedilo en UNA pregunta corta
+- Si pide precio sin foto: pedí foto/captura del producto
+- Máximo 2 líneas, 1 emoji máximo
+- Usá expresiones ticas (pura vida, mae, un toque) pero sin exagerar
+- Sé amable pero directo
+
+TIENDA:
+- Nombre: ${STORE_NAME}
+- Tipo: ${STORE_TYPE}
+- Catálogo: ${CATALOG_URL || "no configurado"}
+- Horario: ${HOURS_DAY}
+
+Respondé SOLO en JSON:
+{
+  "reply": "texto para el cliente (máx 2 líneas)",
+  "action": "REPLY|ASK_DETAILS|ASK_PHOTO|WAIT_OWNER|ESCALATE",
+  "detected_details": "talla/color detectados o null"
+}`;
+
+  const userContext = {
+    mensaje_cliente: text || (hasImage ? "[envió una imagen]" : "[vacío]"),
+    tiene_imagen: hasImage,
+    estado_actual: session?.state || "NEW",
+    estado_descripcion: stateDescriptions[session?.state] || "Desconocido",
+    ultimo_precio: session?.last_offer || null,
+    detalles_previos: session?.last_details_text || null,
+    metodo_entrega: session?.delivery_method || null
+  };
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: JSON.stringify(userContext) }
+        ],
+        temperature: 0.4,
+        max_tokens: 200
+      })
+    });
+
+    if (!resp.ok) {
+      console.log("⚠️ OpenAI error:", resp.status);
+      return null;
+    }
+
+    const data = await resp.json();
+    const content = data.choices?.[0]?.message?.content || "";
+    
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    return null;
+  } catch (e) {
+    console.log("⚠️ AI Client error:", e?.message);
+    return null;
+  }
+}
+
+// IA para clasificar preguntas FAQ del cliente
+async function aiClassifyFAQ(text) {
+  if (!OPENAI_API_KEY) return null;
+
+  const prompt = `Clasificá esta pregunta de un cliente en Costa Rica.
+
+Pregunta: "${text}"
+
+Categorías posibles:
+- HORARIO (hora de atención, cuándo abren/cierran, días)
+- UBICACION (dónde están, dirección, cómo llegar)
+- METODO_PAGO (tarjeta, efectivo, SINPE, cómo pagar)
+- COSTO_ENVIO (cuánto cuesta el envío, precio de envío)
+- ZONA_ENVIO (si hacen envíos, a dónde envían, cobertura)
+- TIEMPO_ENTREGA (cuánto tarda, cuándo llega, días de entrega)
+- GARANTIA (cambios, devoluciones, garantía, si no queda)
+- CATALOGO (qué tienen, mostrar productos, ver fotos, catálogo)
+- SINPE_INFO (número de SINPE, a dónde pagar)
+- PRECIO_SIN_FOTO (pregunta precio pero no ha mandado foto)
+- SALUDO (hola, buenas, buenos días)
+- OTRO (no encaja en ninguna)
+
+Respondé SOLO con la categoría, nada más. Ejemplo: HORARIO`;
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+        max_tokens: 20
+      })
+    });
+
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    const category = (data.choices?.[0]?.message?.content || "").trim().toUpperCase();
+    
+    const validCategories = ["HORARIO", "UBICACION", "METODO_PAGO", "COSTO_ENVIO", "ZONA_ENVIO", 
+                            "TIEMPO_ENTREGA", "GARANTIA", "CATALOGO", "SINPE_INFO", "PRECIO_SIN_FOTO", "SALUDO", "OTRO"];
+    
+    return validCategories.includes(category) ? category : null;
+  } catch (e) {
+    console.log("⚠️ AI FAQ error:", e?.message);
+    return null;
+  }
+}
+
+/**
+ * ============================
  *  NOTIFICAR AL DUEÑO (por WhatsApp)
  * ============================
  */
@@ -684,13 +933,18 @@ async function notifyOwner(message) {
 async function notifyNewQuote(session) {
   const msg = `📦 Nueva consulta
 
-📱 ${session.waId}
+📱 Cliente: ${session.waId}
 📝 ${session.last_details_text || "(sin detalle)"}
 
-Respondé:
-• ${session.waId} 5000 (precio)
-• ${session.waId} 5000-2000 (precio+envío)
-• ${session.waId} 0 (no hay)`;
+━━━━━━━━━━━━━━━
+COPIAR Y RESPONDER:
+
+${session.waId} 5000
+(cambiar 5000 por el precio)
+
+${session.waId} 0
+(si no hay stock)
+━━━━━━━━━━━━━━━`;
 
   await notifyOwner(msg);
 }
@@ -699,25 +953,31 @@ async function notifyIntentConfirmed(session) {
   const method = session.delivery_method === "recoger" ? "🏪 RECOGER" : "🚚 ENVÍO";
   const total = (session.last_offer?.price || 0) + (session.delivery_method === "envio" ? (session.last_offer?.shipping || 0) : 0);
 
-  const msg = `✅ ¡Intención confirmada!
+  const msg = `🎯 ¡INTENCIÓN CONFIRMADA!
 
-📱 ${session.waId}
-💰 ₡${total.toLocaleString()}
-📦 ${method}
-${session.shipping_details ? `📍 ${session.shipping_details}` : ""}
-🔑 Ref: ${session.sinpe_reference || "N/A"}`;
+📱 Cliente: ${session.waId}
+💰 Total: ₡${total.toLocaleString()}
+📦 Método: ${method}
+${session.shipping_details ? `📍 Datos: ${session.shipping_details}` : ""}
+
+Esperando comprobante SINPE...`;
 
   await notifyOwner(msg);
 }
 
 async function notifyPaymentClaim(session) {
-  const msg = `💰 Cliente dice que pagó
+  const msg = `💰 ¡CLIENTE DICE QUE PAGÓ!
 
-📱 ${session.waId}
-🔑 Ref: ${session.sinpe_reference}
-💵 ₡${session.pending_sinpe?.expectedAmount?.toLocaleString() || "?"}
+📱 Cliente: ${session.waId}
+💵 Monto: ₡${session.pending_sinpe?.expectedAmount?.toLocaleString() || "?"}
+📦 Método: ${session.delivery_method === "recoger" ? "🏪 RECOGER" : "🚚 ENVÍO"}
+${session.shipping_details ? `📍 Datos: ${session.shipping_details}` : ""}
 
-Para confirmar: ${session.waId} pagado`;
+━━━━━━━━━━━━━━━
+VERIFICAR Y RESPONDER:
+
+${session.waId} pagado
+━━━━━━━━━━━━━━━`;
 
   await notifyOwner(msg);
 }
@@ -830,18 +1090,216 @@ app.post("/webhook", async (req, res) => {
   // MENSAJE DEL DUEÑO (comandos)
   // ============================================
   if (isOwner(waId)) {
+    const lowText = (text || "").toLowerCase().trim();
+    
+    // Comando SALDO
+    if (lowText === "saldo" || lowText === "fichas") {
+      const remaining = tokensRemaining();
+      const used = account.tokens_used;
+      const total = tokensTotal();
+      await sendWhatsApp(waId, `📊 Tu saldo TICO-bot\n\n🎟️ Fichas: ${remaining} de ${total}\n📈 Usadas: ${used}\n\n${remaining < 20 ? "⚠️ Te quedan pocas fichas" : "✅ Vas bien"}`);
+      return res.sendStatus(200);
+    }
+    
+    // Comando AYUDA
+    if (lowText === "ayuda" || lowText === "help" || lowText === "comandos") {
+      await sendWhatsApp(waId, `🤖 *Comandos TICO-bot*
+
+━━━━━━━━━━━━━━━
+*RESPONDER CONSULTAS:*
+\`50688881234 5000\` = Enviar precio
+\`50688881234 0\` = No hay stock
+
+*CONFIRMAR PAGO:*
+\`50688881234 pagado\` = Confirmar SINPE
+
+*CONTROL DEL BOT:*
+\`50688881234 pausa\` = Hablar vos directo
+\`50688881234 bot\` = Reactivar bot
+\`50688881234 cat\` = Enviar catálogo
+
+*OTROS:*
+\`saldo\` = Ver fichas restantes
+\`ayuda\` = Ver estos comandos
+━━━━━━━━━━━━━━━`);
+      return res.sendStatus(200);
+    }
+    
     const cmd = parseOwnerCommand(text);
     
+    // Si no es comando directo, intentar con IA
+    if (!cmd && OPENAI_API_KEY) {
+      const pendingList = Array.from(pendingQuotes.values());
+      const aiResult = await aiInterpretOwner(text, pendingList);
+      
+      if (aiResult && aiResult.comando !== "NONE") {
+        console.log("🤖 IA interpretó:", aiResult);
+        
+        // Convertir resultado de IA a comando interno
+        if (aiResult.comando === "SALDO") {
+          const remaining = tokensRemaining();
+          const used = account.tokens_used;
+          const total = tokensTotal();
+          await sendWhatsApp(waId, `📊 Tu saldo TICO-bot\n\n🎟️ Fichas: ${remaining} de ${total}\n📈 Usadas: ${used}\n\n${remaining < 20 ? "⚠️ Te quedan pocas fichas" : "✅ Vas bien"}`);
+          return res.sendStatus(200);
+        }
+        
+        if (aiResult.comando === "AYUDA") {
+          await sendWhatsApp(waId, `🤖 *TICO-bot*\n\nSolo escribí natural:\n• "sí hay 12 mil"\n• "no tengo"\n• "ya pagó"\n• "yo le hablo" (pausa)\n• "activar bot"\n• "mandá catálogo"\n\nO usá comandos:\n• 50688881234 5000\n• 50688881234 0\n• saldo\n• ayuda`);
+          return res.sendStatus(200);
+        }
+        
+        // Para comandos que necesitan cliente
+        let clientWaId = aiResult.cliente;
+        
+        // Si no especificó cliente y hay solo uno pendiente, usar ese
+        if (!clientWaId && pendingList.length === 1) {
+          clientWaId = pendingList[0].waId;
+        }
+        
+        // Si quiere mandar mensaje directo
+        if (aiResult.mensaje_directo && clientWaId) {
+          const clientSession = sessions.get(clientWaId);
+          if (clientSession) {
+            await sendWhatsApp(clientWaId, aiResult.mensaje_directo);
+            await sendWhatsApp(waId, `✅ Mensaje enviado a ${clientWaId}`);
+            return res.sendStatus(200);
+          }
+        }
+        
+        if (clientWaId) {
+          const clientSession = sessions.get(clientWaId);
+          if (!clientSession) {
+            await sendWhatsApp(waId, `⚠️ No encontré cliente ${clientWaId}`);
+            return res.sendStatus(200);
+          }
+          
+          // PRECIO
+          if (aiResult.comando === "PRECIO" && aiResult.precio) {
+            account.metrics.quotes_sent += 1;
+            removePendingQuote(clientWaId);
+            
+            if (aiResult.envio) {
+              // Con envío incluido
+              clientSession.state = "PRECIO_TOTAL_ENVIADO";
+              clientSession.last_offer = { price: aiResult.precio, shipping: aiResult.envio };
+              const total = aiResult.precio + aiResult.envio;
+              
+              await sendWhatsApp(clientWaId, 
+                `${frase("si_hay")}\n\nProducto: ₡${aiResult.precio.toLocaleString()}\nEnvío: ₡${aiResult.envio.toLocaleString()}\nTotal: ₡${total.toLocaleString()}\n\n¿Te interesa? 🙌`
+              );
+              await sendWhatsApp(waId, `✅ Precio ₡${total.toLocaleString()} enviado a ${clientWaId}`);
+            } else {
+              // Solo precio, pedir zona
+              clientSession.state = "ESPERANDO_ZONA";
+              clientSession.last_offer = { price: aiResult.precio, shipping: null };
+              
+              await sendWhatsApp(clientWaId, 
+                `${frase("si_hay")}\n\nPrecio: ₡${aiResult.precio.toLocaleString()}\n\n¿De dónde nos escribís?`
+              );
+              await sendWhatsApp(waId, `✅ Precio ₡${aiResult.precio.toLocaleString()} enviado a ${clientWaId}`);
+            }
+            
+            if (SESSIONS_PERSIST) saveSessionsToDisk();
+            return res.sendStatus(200);
+          }
+          
+          // NO HAY
+          if (aiResult.comando === "NO_HAY") {
+            account.metrics.no_stock += 1;
+            clientSession.state = "CERRADO_SIN_STOCK";
+            removePendingQuote(clientWaId);
+            
+            await sendWhatsApp(clientWaId, fraseNoRepetir("no_hay", clientWaId));
+            await sendWhatsApp(waId, `❌ Sin stock notificado a ${clientWaId}`);
+            
+            if (SESSIONS_PERSIST) saveSessionsToDisk();
+            return res.sendStatus(200);
+          }
+          
+          // PAGADO
+          if (aiResult.comando === "PAGADO") {
+            if (clientSession.state !== "ESPERANDO_SINPE") {
+              await sendWhatsApp(waId, `⚠️ ${clientWaId} no está esperando pago.`);
+              return res.sendStatus(200);
+            }
+            
+            clientSession.pending_sinpe.status = "paid";
+            clientSession.state = "PAGO_CONFIRMADO";
+            account.metrics.sinpe_confirmed += 1;
+            cancelSinpeWaitTimer(clientWaId);
+            
+            if (clientSession.delivery_method === "recoger") {
+              let ubicacion = "";
+              if (STORE_ADDRESS) {
+                ubicacion = `\n\n📍 Dirección: ${STORE_ADDRESS}`;
+                if (MAPS_URL) ubicacion += `\n🗺️ Mapa: ${MAPS_URL}`;
+              }
+              const horario = `Lunes a Sábado de ${HOURS_START}am a ${HOURS_END > 12 ? HOURS_END - 12 : HOURS_END}pm`;
+              await sendWhatsApp(clientWaId, `¡Pago confirmado! 🙌\n\nPodés recoger tu pedido:${ubicacion}\n🕐 Horario: ${horario}\n\n¡Pura vida! 🇨🇷`);
+            } else {
+              await sendWhatsApp(clientWaId, `¡Listo! 🙌 Pago confirmado. Ya coordinamos tu envío.`);
+            }
+            
+            await sendWhatsApp(waId, `✅ Pago confirmado para ${clientWaId}`);
+            
+            if (SESSIONS_PERSIST) saveSessionsToDisk();
+            return res.sendStatus(200);
+          }
+          
+          // PAUSA
+          if (aiResult.comando === "PAUSA") {
+            clientSession.paused = true;
+            clientSession.paused_at = Date.now();
+            clientSession.paused_until = Date.now() + (24 * 60 * 60 * 1000);
+            
+            await sendWhatsApp(waId, `⏸️ Bot PAUSADO para ${clientWaId}\n\nPodés chatear directo. El bot se reactiva en 24h o escribí "activar bot ${clientWaId}"`);
+            
+            if (SESSIONS_PERSIST) saveSessionsToDisk();
+            return res.sendStatus(200);
+          }
+          
+          // REANUDAR
+          if (aiResult.comando === "REANUDAR") {
+            clientSession.paused = false;
+            clientSession.paused_at = null;
+            clientSession.paused_until = null;
+            
+            await sendWhatsApp(waId, `▶️ Bot ACTIVO para ${clientWaId}`);
+            
+            if (SESSIONS_PERSIST) saveSessionsToDisk();
+            return res.sendStatus(200);
+          }
+          
+          // CATALOGO
+          if (aiResult.comando === "CATALOGO") {
+            if (!CATALOG_URL) {
+              await sendWhatsApp(waId, `⚠️ No tenés CATALOG_URL configurado.`);
+              return res.sendStatus(200);
+            }
+            
+            await sendWhatsApp(clientWaId, `¡Hola! 🙌 Aquí podés ver todo:\n\n👉 ${CATALOG_URL}\n\nSi ves algo que te gusta, mandame la foto.`);
+            await sendWhatsApp(waId, `📋 Catálogo enviado a ${clientWaId}`);
+            return res.sendStatus(200);
+          }
+        } else if (aiResult.comando !== "NONE") {
+          // Comando que necesita cliente pero no lo especificó
+          await sendWhatsApp(waId, `⚠️ ¿Para cuál cliente? Hay ${pendingList.length} pendientes.`);
+          return res.sendStatus(200);
+        }
+      }
+    }
+    
     if (!cmd) {
-      // No es comando válido, mostrar pendientes
+      // No es comando válido ni IA pudo interpretar
       if (pendingQuotes.size === 0) {
-        await sendWhatsApp(waId, "📭 No hay consultas pendientes.");
+        await sendWhatsApp(waId, "📭 No hay consultas pendientes.\n\nEscribí natural: \"sí hay 12 mil\" o \"no tengo\"");
       } else {
         let list = "📋 Pendientes:\n\n";
         for (const p of pendingQuotes.values()) {
           list += `📱 ${p.waId}\n📝 ${p.details}\n\n`;
         }
-        list += "Respondé: [número] [precio] o [número] 0";
+        list += "Respondé natural: \"sí hay 12 mil\" o \"no tengo\"";
         await sendWhatsApp(waId, list);
       }
       return res.sendStatus(200);
@@ -912,10 +1370,62 @@ app.post("/webhook", async (req, res) => {
       // Cancelar timer de espera
       cancelSinpeWaitTimer(cmd.clientWaId);
 
-      await sendWhatsApp(cmd.clientWaId, `¡Listo! 🙌 Pago confirmado. ${frase("gracias")} Ya coordinamos tu pedido.`);
+      // Si es RECOGER, ahora sí damos la dirección
+      if (clientSession.delivery_method === "recoger") {
+        let ubicacion = "";
+        if (STORE_ADDRESS) {
+          ubicacion = `\n\n📍 Dirección: ${STORE_ADDRESS}`;
+          if (MAPS_URL) {
+            ubicacion += `\n🗺️ Mapa: ${MAPS_URL}`;
+          }
+        }
+        const horario = `Lunes a Sábado de ${HOURS_START}am a ${HOURS_END > 12 ? HOURS_END - 12 : HOURS_END}pm`;
+        
+        await sendWhatsApp(cmd.clientWaId, `¡Pago confirmado! 🙌\n\nPodés recoger tu pedido:${ubicacion}\n🕐 Horario: ${horario}\n\n📋 Presentá tu cédula al recoger.\n\n¡Pura vida! 🇨🇷`);
+      } else {
+        await sendWhatsApp(cmd.clientWaId, `¡Listo! 🙌 Pago confirmado. ${frase("gracias")} Ya coordinamos tu envío.`);
+      }
+      
       await sendWhatsApp(waId, `✅ Pago confirmado para ${cmd.clientWaId}`);
       
       if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
+
+    // PAUSA - Desactivar bot para ese cliente
+    if (cmd.type === "PAUSA") {
+      clientSession.paused = true;
+      clientSession.paused_at = Date.now();
+      clientSession.paused_until = Date.now() + (24 * 60 * 60 * 1000); // 24 horas
+      
+      await sendWhatsApp(waId, `⏸️ Bot PAUSADO para ${cmd.clientWaId}\n\nPodés chatear directo con el cliente.\nEl bot se reactiva en 24h o escribí:\n${cmd.clientWaId} bot`);
+      
+      if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
+
+    // REANUDAR - Reactivar bot para ese cliente
+    if (cmd.type === "REANUDAR") {
+      clientSession.paused = false;
+      clientSession.paused_at = null;
+      clientSession.paused_until = null;
+      
+      await sendWhatsApp(waId, `▶️ Bot ACTIVO para ${cmd.clientWaId}\n\nEl bot vuelve a responder automáticamente.`);
+      
+      if (SESSIONS_PERSIST) saveSessionsToDisk();
+      return res.sendStatus(200);
+    }
+
+    // CATALOGO - Enviar catálogo al cliente
+    if (cmd.type === "CATALOGO") {
+      if (!CATALOG_URL) {
+        await sendWhatsApp(waId, `⚠️ No tenés CATALOG_URL configurado.`);
+        return res.sendStatus(200);
+      }
+      
+      await sendWhatsApp(cmd.clientWaId, `¡Hola! 🙌 Aquí podés ver todo lo que tenemos:\n\n👉 ${CATALOG_URL}\n\nSi ves algo que te gusta, mandame la foto y te ayudo.`);
+      await sendWhatsApp(waId, `📋 Catálogo enviado a ${cmd.clientWaId}`);
+      
       return res.sendStatus(200);
     }
 
@@ -928,6 +1438,23 @@ app.post("/webhook", async (req, res) => {
   account.metrics.chats_total += 1;
   const session = getSession(waId);
   session.last_activity = Date.now();
+  
+  // ---- VERIFICAR SI EL BOT ESTÁ PAUSADO PARA ESTE CLIENTE ----
+  if (session.paused) {
+    // Verificar si ya pasaron 24 horas
+    if (session.paused_until && Date.now() > session.paused_until) {
+      // Expiró la pausa, reactivar
+      session.paused = false;
+      session.paused_at = null;
+      session.paused_until = null;
+      console.log(`▶️ Pausa expirada, bot reactivado para: ${waId}`);
+    } else {
+      // Bot sigue pausado - no responder, solo notificar al dueño
+      await notifyOwner(`💬 MENSAJE (bot pausado)\n📱 ${waId}\n💬 "${text || "[imagen]"}"`);
+      console.log(`⏸️ Bot pausado para ${waId}, mensaje pasado al dueño`);
+      return res.sendStatus(200);
+    }
+  }
   
   // Si la conversación estaba abandonada, se toma como chat nuevo (sin costo)
   if (session.state === "CERRADO_TIMEOUT" || session.state === "CERRADO_SIN_INTERES" || session.state === "CERRADO_SIN_STOCK") {
@@ -1137,18 +1664,9 @@ app.post("/webhook", async (req, res) => {
         
         const sinpe = SINPE_NUMBER ? `💳 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}` : "";
         
-        let ubicacion = "";
-        if (STORE_ADDRESS) {
-          ubicacion = `\n\n📍 Dirección: ${STORE_ADDRESS}`;
-          if (MAPS_URL) {
-            ubicacion += `\n🗺️ Mapa: ${MAPS_URL}`;
-          }
-        }
-        
-        const horario = `Lunes a Sábado de ${HOURS_START}am a ${HOURS_END > 12 ? HOURS_END - 12 : HOURS_END}pm`;
-        
+        // NO damos dirección hasta que pague
         await sendWhatsApp(waId, 
-          `¡Perfecto! 🙌\n\nPodés recogerlo en nuestra tienda ${horario}.${ubicacion}\n\nTotal: ₡${price.toLocaleString()} (sin envío)\n\n${sinpe}\n\nPorfa pasame estos datos y el comprobante del SINPE:\n\n👤 Nombre completo:\n🪪 Cédula:\n\n⚠️ En la descripción del SINPE poné tu nombre`
+          `¡Perfecto! 🙌\n\nTotal: ₡${price.toLocaleString()}\n\n${sinpe}\n\nPorfa pasame estos datos y el comprobante del SINPE:\n\n👤 Nombre completo:\n🪪 Cédula:\n\n⚠️ En la descripción del SINPE poné tu nombre\n\nCuando confirme tu pago, te envío la dirección y horario para recoger 📍`
         );
         await notifyIntentConfirmed(session);
         if (SESSIONS_PERSIST) saveSessionsToDisk();
@@ -1299,27 +1817,152 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // FAQ
+    // =====================================
+    // FAQ CON IA - Detecta intención
+    // =====================================
     const low = text.toLowerCase();
-    if (low.includes("horario")) {
-      await sendWhatsApp(waId, `🕘 Horario: ${HOURS_DAY}`);
-      return res.sendStatus(200);
+    
+    // Intentar clasificar con IA primero
+    let faqCategory = null;
+    if (OPENAI_API_KEY) {
+      faqCategory = await aiClassifyFAQ(text);
+      console.log("🤖 FAQ IA detectó:", faqCategory);
     }
-    if (low.includes("ubic") || low.includes("donde")) {
-      if (STORE_TYPE === "fisica" && MAPS_URL) {
-        await sendWhatsApp(waId, `📍 ${MAPS_URL}`);
-      } else {
-        await sendWhatsApp(waId, `Somos tienda virtual 🙌 Mandame la foto y te ayudo.`);
+    
+    // Fallback a keywords si no hay IA
+    if (!faqCategory) {
+      if (low.includes("horario") || low.includes("hora") || low.includes("abierto") || low.includes("atienden") || low.includes("cierran")) {
+        faqCategory = "HORARIO";
+      } else if (low.includes("ubic") || low.includes("donde estan") || low.includes("direcci") || low.includes("local") || low.includes("llegar")) {
+        faqCategory = "UBICACION";
+      } else if (low.includes("tarjeta") || low.includes("visa") || low.includes("efectivo") || low.includes("como pago") || low.includes("cómo pago")) {
+        faqCategory = "METODO_PAGO";
+      } else if (low.includes("costo envio") || low.includes("precio envio") || low.includes("cuanto cobran envio") || low.includes("valor del envio")) {
+        faqCategory = "COSTO_ENVIO";
+      } else if (low.includes("envian") || low.includes("envían") || low.includes("hacen envio") || low.includes("mandan a") || low.includes("llegan a")) {
+        faqCategory = "ZONA_ENVIO";
+      } else if (low.includes("cuanto tarda") || low.includes("cuando llega") || low.includes("tiempo de entrega") || low.includes("demora")) {
+        faqCategory = "TIEMPO_ENTREGA";
+      } else if (low.includes("garantia") || low.includes("garantía") || low.includes("devolucion") || low.includes("cambio") || low.includes("no queda") || low.includes("defecto")) {
+        faqCategory = "GARANTIA";
+      } else if (low.includes("catalogo") || low.includes("catálogo") || low.includes("que tienen") || low.includes("qué tienen") || low.includes("fotos") || low.includes("mostrar")) {
+        faqCategory = "CATALOGO";
+      } else if (low.includes("sinpe") || low.includes("numero para pagar") || low.includes("a donde pago")) {
+        faqCategory = "SINPE_INFO";
+      } else if ((low.includes("precio") || low.includes("cuanto") || low.includes("cuesta")) && !session.last_image_id) {
+        faqCategory = "PRECIO_SIN_FOTO";
       }
-      return res.sendStatus(200);
     }
-    if (low.includes("precio") || low.includes("cuanto")) {
-      await sendWhatsApp(waId, `Mandame la foto del producto y decime talla/color/tamaño 🙌`);
-      return res.sendStatus(200);
+    
+    // Responder según categoría detectada
+    if (faqCategory) {
+      switch (faqCategory) {
+        case "HORARIO":
+          await sendWhatsApp(waId, `🕘 Horario: ${HOURS_DAY}`);
+          return res.sendStatus(200);
+          
+        case "UBICACION":
+          if (STORE_TYPE === "fisica" && (STORE_ADDRESS || MAPS_URL)) {
+            await sendWhatsApp(waId, `📍 Estamos en: ${STORE_ADDRESS || ""}${MAPS_URL ? `\n🗺️ ${MAPS_URL}` : ""}`);
+          } else {
+            await sendWhatsApp(waId, `Somos tienda virtual 🙌 Hacemos envíos a todo el país.`);
+          }
+          return res.sendStatus(200);
+          
+        case "METODO_PAGO":
+          if (STORE_TYPE === "fisica") {
+            await sendWhatsApp(waId, `💳 En tienda: tarjeta o efectivo\n📱 Para envíos: SINPE Móvil`);
+          } else {
+            await sendWhatsApp(waId, `📱 Por el momento solo SINPE Móvil`);
+          }
+          return res.sendStatus(200);
+          
+        case "COSTO_ENVIO":
+          await sendWhatsApp(waId, `🚚 Envíos:\n• GAM: ${SHIPPING_GAM}\n• Fuera de GAM: ${SHIPPING_RURAL}`);
+          return res.sendStatus(200);
+          
+        case "ZONA_ENVIO":
+          await sendWhatsApp(waId, `🚚 Sí, hacemos envíos a todo el país 🇨🇷\n• GAM: ${SHIPPING_GAM}\n• Fuera de GAM: ${SHIPPING_RURAL}`);
+          return res.sendStatus(200);
+          
+        case "TIEMPO_ENTREGA":
+          await sendWhatsApp(waId, `📦 Tiempo de entrega: ${DELIVERY_DAYS} después de confirmado el pago.\n\n⚠️ Pueden haber atrasos por Correos de CR.`);
+          return res.sendStatus(200);
+          
+        case "GARANTIA":
+          await sendWhatsApp(waId, `✅ Garantía: ${WARRANTY_DAYS}`);
+          return res.sendStatus(200);
+          
+        case "CATALOGO":
+          if (NO_PHOTOS_MSG) {
+            await sendWhatsApp(waId, NO_PHOTOS_MSG);
+          } else if (CATALOG_URL) {
+            await sendWhatsApp(waId, `Hola 🙌 Todos nuestros productos están en:\n\n👉 ${CATALOG_URL}\n\nSi ves algo que te gusta, mandame la foto y te ayudo con precio y disponibilidad.`);
+          } else {
+            await sendWhatsApp(waId, `Hola 🙌 Si ya viste algo en nuestras redes, mandame la foto del producto y con gusto te ayudo.`);
+          }
+          return res.sendStatus(200);
+          
+        case "SINPE_INFO":
+          if (SINPE_NUMBER) {
+            await sendWhatsApp(waId, `📱 SINPE: ${SINPE_NUMBER}${SINPE_NAME ? ` (${SINPE_NAME})` : ""}\n\n⚠️ Primero mandame la foto del producto para confirmar disponibilidad.`);
+          } else {
+            await sendWhatsApp(waId, `El SINPE te lo paso cuando confirmemos tu pedido 🙌 Mandame la foto del producto.`);
+          }
+          return res.sendStatus(200);
+          
+        case "PRECIO_SIN_FOTO":
+          await sendWhatsApp(waId, `Mandame la foto del producto y decime talla/color/tamaño 🙌`);
+          return res.sendStatus(200);
+          
+        case "SALUDO":
+          // No hacer nada, dejar que siga al greeting normal o IA
+          break;
+          
+        // OTRO - continúa al IA fallback
+      }
     }
 
-    // Default
-    await sendWhatsApp(waId, `Dale 🙌 Mandame la foto y decime talla, color o tamaño.`);
+    // =====================================
+    // IA FALLBACK - Intentar responder con IA
+    // =====================================
+    if (OPENAI_API_KEY) {
+      const aiReply = await aiDraftReply(waId, text, session, false);
+      
+      if (aiReply?.reply) {
+        console.log("🤖 IA respondió al cliente:", aiReply.action);
+        
+        // Si IA detectó detalles, guardarlos
+        if (aiReply.detected_details) {
+          session.last_details_text = aiReply.detected_details;
+        }
+        
+        // Si IA quiere escalar al dueño
+        if (aiReply.action === "ESCALATE") {
+          await notifyOwner(`❓ IA ESCALÓ\n📱 ${waId}\n💬 "${text}"\n\n→ Respondé dentro de 24h`);
+        }
+        
+        // Si IA quiere que esperemos al dueño (ej: piden precio)
+        if (aiReply.action === "WAIT_OWNER" && !session.sent_to_seller) {
+          session.sent_to_seller = true;
+          session.state = "ENVIADO_A_VENDEDOR";
+          account.metrics.quotes_requested += 1;
+          addPendingQuote(session);
+          await notifyNewQuote(session);
+        }
+        
+        await sendWhatsApp(waId, aiReply.reply);
+        if (SESSIONS_PERSIST) saveSessionsToDisk();
+        return res.sendStatus(200);
+      }
+    }
+
+    // =====================================
+    // SALIDA DE EMERGENCIA
+    // Todo lo demás que no entendemos (y IA falló)
+    // =====================================
+    await notifyOwner(`❓ MENSAJE MANUAL\n📱 ${waId}\n💬 "${text}"\n\n→ Respondé dentro de 24h para no pagar extra`);
+    await sendWhatsApp(waId, `Ahorita no te puedo contestar eso 🙌 Pero ya le paso tu consulta y te contactamos.`);
     return res.sendStatus(200);
   }
 
