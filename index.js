@@ -5,6 +5,9 @@ const crypto = require("crypto");
 
 const app = express();
 
+// Health check instantáneo para Railway
+app.get("/health", (req, res) => res.status(200).send("OK"));
+
 /**
  ============================
  FETCH (Polyfill si Node < 18)
