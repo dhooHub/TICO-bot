@@ -5,7 +5,13 @@ const crypto = require("crypto");
 
 const app = express();
 
-// Health check INMEDIATO - debe ser lo primero
+// ✅ SERVIDOR PRIMERO - Railway necesita esto inmediatamente
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
+});
+
+// Health check INMEDIATO
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
@@ -91,7 +97,7 @@ app.use(
  ============================
  */
 function verifyMetaSignature(req) {
-  if (!APP_SECRET) return true; // si no configuraste APP_SECRET, no bloquea
+  if (!APP_SECRET) return true;
 
   const signature = req.get("x-hub-signature-256");
   if (!signature) return false;
@@ -181,7 +187,7 @@ const pendingQuotes = new Map();
  ANTI-DUPLICADO (Meta retries)
  ============================
  */
-const processedMsgIds = new Map(); // msgId -> timestamp
+const processedMsgIds = new Map();
 const DEDUPE_TTL_MS = 10 * 60 * 1000;
 
 function isDuplicateMessage(msgId) {
@@ -204,7 +210,7 @@ setInterval(() => {
  PAGINACIÓN INBOX (dueño)
  ============================
  */
-const ownerInboxPage = new Map(); // ownerWaId -> pageIndex
+const ownerInboxPage = new Map();
 const INBOX_PAGE_SIZE = 10;
 function getOwnerPage(ownerWaId) {
   return Number(ownerInboxPage.get(ownerWaId) || 0);
@@ -367,9 +373,6 @@ function ensureMonthlyReset() {
   console.log(`🔄 Reset mensual: ${key}`);
   if (STATS_PERSIST) saveStatsToDisk();
 }
-
-loadSessionsFromDisk();
-loadStatsFromDisk();
 
 /**
  ============================
@@ -1055,7 +1058,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
   account.metrics.chats_total += 1;
   if (STATS_PERSIST) saveStatsToDisk();
 
-  // Mapear botones a texto
   if (text === "BTN_YES") text = "si";
   if (text === "BTN_NO") text = "no";
   if (text === "BTN_MORE") text = "otra foto";
@@ -1070,7 +1072,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     session.state = "NEW";
   }
 
-  // Fuera de horario: pedir foto + detalles y dejar pendiente
   if (!isDaytime() && !hasImage) {
     const lower = norm(text);
     const isInfo = /\b(precio|cuanto|cuesta|vale|hay|tienen|disponible|stock)\b/.test(lower);
@@ -1085,14 +1086,12 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
-  // Imagen: agrupar ráfaga + reenviar SIEMPRE al dueño (todas las fotos)
   if (hasImage) {
     handlePhotoBuffer(waId, imageId, text, async (photos) => {
       const details = String(text || "").trim() || "(sin detalles)";
       session.last_image_id = photos[0]?.imageId || null;
       session.last_details_text = details;
 
-      // log corto
       session.details_log = Array.isArray(session.details_log) ? session.details_log : [];
       session.details_log.push({ at: new Date().toISOString(), details, count: photos.length });
       if (session.details_log.length > 5) session.details_log = session.details_log.slice(-5);
@@ -1104,7 +1103,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
       await sendWhatsApp(waId, fraseNoRepetir("revisando", waId));
       addPendingQuote(session);
 
-      // ✅ al dueño: primera foto con caption + luego el resto
       await notifyOwner(
         `📸 Cliente: ${waId}\n📝 ${details}\n📷 Fotos: ${photos.length}\n\nCopiá y pegá:\n${waId} 7500\n${waId} 7500-2500\n${waId} 0`,
         photos[0]?.imageId || null
@@ -1119,7 +1117,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
-  // links máximo 5
   if (countLinks(text) > 5) {
     await sendWhatsApp(waId, "Pura vida 🙌 Pasame máximo 5 links para revisarlo bien.");
     return;
@@ -1127,10 +1124,8 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   addToMessageHistory(session, "user", String(text || ""));
 
-  // si está esperando confirmación del vendedor, no avanzar
   if (session.state === "ESPERANDO_CONFIRMACION_VENDEDOR") return;
 
-  // Estado: precio enviado
   if (session.state === "PRECIO_ENVIADO") {
     if (isYes(text)) {
       if (!canConsumeToken()) return sendWhatsApp(waId, msgOutOfTokens());
@@ -1187,7 +1182,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
-  // Método entrega
   if (session.state === "PREGUNTANDO_METODO") {
     const method = detectDeliveryMethod(text);
     if (method === "envio") {
@@ -1210,7 +1204,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
-  // Datos → SINPE
   if (session.state === "PIDIENDO_DATOS" || session.state === "PIDIENDO_DATOS_RECOGER") {
     session.shipping_details = String(text || "");
     session.sinpe_reference = generateSinpeReference(waId);
@@ -1221,7 +1214,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
     await sendButtons(
       waId,
-      `¡Perfecto! 🙌\n\nTotal: ₡${total.toLocaleString()}\n\nSINPE: ${SINPE_NUMBER}\nTitular: ${SINPE_NAME}\nRef: ${session.sinpe_reference}\n\nCuando lo hagás, tocá “Ya pagué” 💳`,
+      `¡Perfecto! 🙌\n\nTotal: ₡${total.toLocaleString()}\n\nSINPE: ${SINPE_NUMBER}\nTitular: ${SINPE_NAME}\nRef: ${session.sinpe_reference}\n\nCuando lo hagás, tocá "Ya pagué" 💳`,
       [{ id: "BTN_YAPAGUE", title: "Ya pagué" }, { id: "BTN_MORE", title: "Enviar otra foto" }]
     );
 
@@ -1238,7 +1231,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
-  // Esperando SINPE
   if (session.state === "ESPERANDO_SINPE") {
     const lower = norm(text);
     if (lower.includes("listo") || lower.includes("pague") || lower.includes("pagué") || lower.includes("transferi") || lower.includes("ya")) {
@@ -1248,7 +1240,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
-  // FAQs rápidas
   const lower = norm(text);
 
   if (/\b(envio|entregan|delivery|envian)\b/.test(lower)) {
@@ -1280,7 +1271,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
-  // Saludo → catálogo + pedir foto
   if (isGreeting(text) && String(text || "").length < 25) {
     const catalogMsg = getCatalogLinks();
     const greeting = `${fraseNoRepetir("saludos", waId)}\n\n${catalogMsg ? catalogMsg + "\n\n" : ""}Mandáme una foto del producto que te interesa 📸`;
@@ -1289,7 +1279,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
-  // Pide precio/stock sin foto → pedir foto
   if (/\b(precio|cuanto|cuesta|vale)\b/.test(lower)) {
     await sendWhatsApp(waId, "Mandáme una foto del producto 📸");
     return;
@@ -1299,7 +1288,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
-  // IA (si aplica)
   if (shouldUseAI(session, text, hasImage)) {
     const ai = await aiHandleMessage(text, session);
     if (ai?.reply) {
@@ -1310,7 +1298,6 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
-  // Fallback
   const catalogMsg = !session.catalog_sent ? getCatalogLinks() : "";
   const fallback = catalogMsg ? `${catalogMsg}\n\nMandáme una foto del producto 📸` : "Mandáme una foto del producto 📸";
   await sendWhatsApp(waId, fallback);
@@ -1341,7 +1328,6 @@ app.post("/webhook", async (req, res) => {
 
       const waId = msg.from;
 
-      // Dueño (text + interactive)
       if (OWNER_PHONE && waId === OWNER_PHONE) {
         if (msg.type === "text") {
           await handleOwnerCommand(waId, msg.text?.body || "");
@@ -1410,7 +1396,6 @@ app.get("/status", (req, res) => {
       type: STORE_TYPE,
       hours: HOURS_DAY,
       sinpe: SINPE_NUMBER ? "✅" : "❌",
-      // ✅ FIX precedencia
       catalog: (CATALOG_URL || CATALOG_URLS) ? "✅" : "❌",
       ai: OPENAI_API_KEY ? "✅" : "❌",
       security: APP_SECRET ? "✅" : "❌",
@@ -1450,11 +1435,13 @@ setInterval(() => {
   console.log("⏰ Keep-alive");
 }, 5 * 60 * 1000);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
+// ✅ Cargar datos DESPUÉS de que el servidor esté listo
+setTimeout(() => {
+  loadSessionsFromDisk();
+  loadStatsFromDisk();
   console.log(
     `\n🤖 TICO-BOT | Puerto ${PORT} | ${STORE_NAME} (${STORE_TYPE})\n` +
       `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
       `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${SESSIONS_PERSIST ? "ON" : "OFF"} | M=${STATS_PERSIST ? "ON" : "OFF"}\n`
   );
-});
+}, 100);
