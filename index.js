@@ -5,8 +5,10 @@ const crypto = require("crypto");
 
 const app = express();
 
-// Health check instantáneo para Railway
-app.get("/health", (req, res) => res.status(200).send("OK"));
+// Health check INMEDIATO - debe ser lo primero
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
 
 /**
  ============================
