@@ -1449,7 +1449,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(
     `\n🤖 TICO-BOT | Puerto ${PORT} | ${STORE_NAME} (${STORE_TYPE})\n` +
       `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
