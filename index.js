@@ -5,9 +5,12 @@ const crypto = require("crypto");
 
 const app = express();
 
-// ✅ SERVIDOR PRIMERO - Railway necesita esto inmediatamente
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
   console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
 });
 
