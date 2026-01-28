@@ -5,20 +5,6 @@ const crypto = require("crypto");
 
 const app = express();
 
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
-});
-
-// Health check INMEDIATO
-app.get("/health", (req, res) => {
-  res.status(200).send("OK");
-});
-
 /**
  ============================
  FETCH (Polyfill si Node < 18)
@@ -1381,6 +1367,10 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
 app.get("/status", (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY) return res.status(401).send("Unauthorized");
   ensureMonthlyReset();
@@ -1438,13 +1428,21 @@ setInterval(() => {
   console.log("⏰ Keep-alive");
 }, 5 * 60 * 1000);
 
-// ✅ Cargar datos DESPUÉS de que el servidor esté listo
-setTimeout(() => {
+/**
+ ============================
+ INICIAR SERVIDOR (AL FINAL)
+ ============================
+ */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  // Cargar datos después de que el servidor esté listo
   loadSessionsFromDisk();
   loadStatsFromDisk();
+  
+  console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
   console.log(
     `\n🤖 TICO-BOT | Puerto ${PORT} | ${STORE_NAME} (${STORE_TYPE})\n` +
-      `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
-      `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${SESSIONS_PERSIST ? "ON" : "OFF"} | M=${STATS_PERSIST ? "ON" : "OFF"}\n`
+    `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
+    `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${SESSIONS_PERSIST ? "ON" : "OFF"} | M=${STATS_PERSIST ? "ON" : "OFF"}\n`
   );
-}, 100);
+});
