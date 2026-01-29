@@ -1299,6 +1299,10 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
  ============================
  */
 app.post("/webhook", async (req, res) => {
+  console.log("📥 WEBHOOK ENTRADA");
+  console.log("Headers:", req.headers["x-hub-signature-256"]);
+  console.log("Body:", JSON.stringify(req.body).slice(0, 300));
+  
   try {
     if (!verifyMetaSignature(req)) {
       console.log("⚠️ Firma Meta inválida");
