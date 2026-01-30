@@ -1,1 +1,16 @@
-
+{
+  "name": "TICO-bot Panel",
+  "short_name": "TICO-bot",
+  "description": "Panel de control para tu bot de ventas",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#075E54",
+  "theme_color": "#075E54",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
