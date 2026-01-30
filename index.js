@@ -1,7 +1,16 @@
-/**
+/** ============================
  * TICO-bot (WhatsApp Cloud API)
- * index.js — versión completa + upgrades (confirmaciones dueño SI/NO/EDITAR, SINPE con comprobante, VIP/tags/bloqueo, abandonados 2h)
- */
+ * index.js — versión completa FINAL (con fixes)
+ *
+ * FIXES APLICADOS:
+ * ✅ Webhook: responde 200 rápido + procesa async + itera entry/changes
+ * ✅ Elimina duplicados: resetCloseTimer (solo 1) + comprobante SINPE (solo 1 ruta)
+ * ✅ Garbage Collector (limpieza Maps / sesiones viejas)
+ * ✅ PROFILES reales (load al iniciar + VIP/BLOCK por profile opcional)
+ * ✅ REQUIRE_OWNER_CONFIRM (toggle)
+ * ✅ Métricas vip_routed / blocked_hits
+ * ✅ Manejo de errores WA: alerta al dueño (401/403/400 opcional)
+ * ============================ */
 
 const express = require("express");
 const fs = require("fs");
@@ -66,10 +75,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1";
 const SESSIONS_PERSIST = String(process.env.SESSIONS_PERSIST || "") === "1";
 
-// ✅ Premium-deluxe
-const VIP_PERSIST = String(process.env.VIP_PERSIST || "1") === "1";
-const PROFILES_PERSIST = String(process.env.PROFILES_PERSIST || "1") === "1"; // tags/bloqueo/notas
-const REQUIRE_OWNER_CONFIRM = String(process.env.REQUIRE_OWNER_CONFIRM || "1") === "1";
+// Premium
+const PROFILES_PERSIST = String(process.env.PROFILES_PERSIST || "1") === "1";
+const REQUIRE_OWNER_CONFIRM =
+  String(process.env.REQUIRE_OWNER_CONFIRM || "1") === "1";
 
 const SESSION_TIMEOUT_HOURS = Number(process.env.SESSION_TIMEOUT_HOURS || 2);
 const PHOTO_WAIT_SECONDS = Number(process.env.PHOTO_WAIT_SECONDS || 5);
@@ -77,8 +86,12 @@ const PHOTO_WAIT_SECONDS = Number(process.env.PHOTO_WAIT_SECONDS || 5);
 const SINPE_SMS_SECRET = process.env.SINPE_SMS_SECRET || "";
 const SINPE_WAIT_MINUTES = Number(process.env.SINPE_WAIT_MINUTES || 3);
 
-// ✅ abandonados / follow-up 2h (sin 24h)
+// abandonados / follow-up
 const PRO_REMINDER = String(process.env.PRO_REMINDER || "1") === "1";
+const ABANDONED_REMINDER_HOURS = Number(
+  process.env.ABANDONED_REMINDER_HOURS || 2
+);
+const ABANDONED_REMINDER_MS = ABANDONED_REMINDER_HOURS * 60 * 60 * 1000;
 
 /**
  ============================
@@ -145,8 +158,8 @@ function getCatalogLinks(maxLinks = 5) {
   const urls = CATALOG_URLS
     ? CATALOG_URLS.split(",").map((u) => u.trim()).filter(Boolean)
     : CATALOG_URL
-      ? [CATALOG_URL]
-      : [];
+    ? [CATALOG_URL]
+    : [];
 
   if (urls.length === 0) return "";
   const toShow = urls.slice(0, maxLinks);
@@ -184,8 +197,27 @@ function waDigits(s = "") {
   return String(s || "").replace(/[^\d]/g, "");
 }
 
+// Normaliza teléfono CR: si viene 8 dígitos -> agrega 506
+function normalizeCRPhone(input) {
+  const d = waDigits(input);
+  if (d.length === 8) return "506" + d;
+  if (d.length === 11 && d.startsWith("506")) return d;
+  return d;
+}
+
 function graphMessagesUrl() {
   return `https://graph.facebook.com/${GRAPH_API_VERSION}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+}
+
+/**
+ ============================
+ FILE SYSTEM SEGURO
+ ============================
+ */
+function safeWriteJson(file, data) {
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
 }
 
 /**
@@ -194,98 +226,9 @@ function graphMessagesUrl() {
  ============================
  */
 const sessions = new Map();
-const CLOSE_AFTER_MS = SESSION_TIMEOUT_HOURS * 60 * 60 * 1000;
-
 const photoBuffers = new Map();
 const sinpeWaitTimers = new Map();
 const pendingQuotes = new Map();
-
-/**
- ============================
- PREMIUM: VIP / BLOQUEO / TAGS / NOTAS
- ============================
- */
-const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
-const profiles = new Map(); // waId -> { tags:[], note:"", blocked:false, vip:false, created_at, updated_at }
-
-function getProfile(waId) {
-  const id = String(waId || "");
-  if (!profiles.has(id)) {
-    profiles.set(id, {
-      waId: id,
-      tags: [],
-      note: "",
-      blocked: false,
-      vip: false,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-  }
-  return profiles.get(id);
-}
-
-function touchProfile(p) {
-  p.updated_at = new Date().toISOString();
-}
-
-function saveProfilesToDisk() {
-  if (!PROFILES_PERSIST) return;
-  try {
-    const arr = Array.from(profiles.values());
-    safeWriteJson(PROFILES_FILE, arr);
-  } catch (e) {
-    console.log("⚠️ Error guardando profiles:", e?.message);
-  }
-}
-
-function loadProfilesFromDisk() {
-  if (!PROFILES_PERSIST) return;
-  try {
-    if (!fs.existsSync(PROFILES_FILE)) return;
-    const arr = JSON.parse(fs.readFileSync(PROFILES_FILE, "utf-8"));
-    if (Array.isArray(arr)) {
-      for (const p of arr) {
-        if (p?.waId) profiles.set(String(p.waId), p);
-      }
-      console.log(`👤 Profiles cargados: ${profiles.size}`);
-    }
-  } catch (e) {
-    console.log("⚠️ Error cargando profiles:", e?.message);
-  }
-}
-
-setInterval(() => {
-  if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
-}, 5 * 60 * 1000);
-
-/**
- ============================
- CONFIRMACIONES DUEÑO: SI / NO / EDITAR
- ============================
- */
-const ownerPendingConfirm = new Map(); // ownerWaId -> { action, preview, created_at }
-const ownerEditMode = new Map(); // ownerWaId -> true si pidió EDITAR
-
-function setOwnerPending(ownerWaId, action, preview) {
-  ownerPendingConfirm.set(String(ownerWaId), {
-    action,
-    preview,
-    created_at: Date.now(),
-  });
-}
-
-function clearOwnerPending(ownerWaId) {
-  ownerPendingConfirm.delete(String(ownerWaId));
-  ownerEditMode.delete(String(ownerWaId));
-}
-
-function getOwnerPending(ownerWaId) {
-  return ownerPendingConfirm.get(String(ownerWaId));
-}
-
-function formatConfirmPreview(preview) {
-  return `🧾 Confirmá el envío:\n\n${preview}\n\nRespondé con los botones:`;
-}
 
 /**
  ============================
@@ -326,13 +269,84 @@ function setOwnerPage(ownerWaId, page) {
 
 /**
  ============================
- FILE SYSTEM SEGURO
+ PROFILES (VIP / BLOQUEO / TAGS / NOTAS)
  ============================
  */
-function safeWriteJson(file, data) {
-  const tmp = file + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
-  fs.renameSync(tmp, file);
+const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
+const profiles = new Map(); // waId -> { waId, tags:[], note:"", blocked:false, vip:false, created_at, updated_at }
+
+function getProfile(waId) {
+  const id = String(waId || "");
+  if (!profiles.has(id)) {
+    profiles.set(id, {
+      waId: id,
+      tags: [],
+      note: "",
+      blocked: false,
+      vip: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  }
+  return profiles.get(id);
+}
+function touchProfile(p) {
+  p.updated_at = new Date().toISOString();
+}
+
+function saveProfilesToDisk() {
+  if (!PROFILES_PERSIST) return;
+  try {
+    const arr = Array.from(profiles.values());
+    safeWriteJson(PROFILES_FILE, arr);
+  } catch (e) {
+    console.log("⚠️ Error guardando profiles:", e?.message);
+  }
+}
+
+function loadProfilesFromDisk() {
+  if (!PROFILES_PERSIST) return;
+  try {
+    if (!fs.existsSync(PROFILES_FILE)) return;
+    const arr = JSON.parse(fs.readFileSync(PROFILES_FILE, "utf-8"));
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (p?.waId) profiles.set(String(p.waId), p);
+      }
+      console.log(`👤 Profiles cargados: ${profiles.size}`);
+    }
+  } catch (e) {
+    console.log("⚠️ Error cargando profiles:", e?.message);
+  }
+}
+
+setInterval(() => {
+  if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
+}, 5 * 60 * 1000);
+
+/**
+ ============================
+ VIP/BLOCK por ENV (fallback)
+ ============================
+ */
+const VIP_NUMBERS = (process.env.VIP_NUMBERS || "")
+  .split(",")
+  .map((x) => normalizeCRPhone(x))
+  .filter(Boolean);
+
+const BLOCKED_NUMBERS = (process.env.BLOCKED_NUMBERS || "")
+  .split(",")
+  .map((x) => normalizeCRPhone(x))
+  .filter(Boolean);
+
+const vipSet = new Set(VIP_NUMBERS);
+const blockedSet = new Set(BLOCKED_NUMBERS);
+
+function isVIP(waId) {
+  return vipSet.has(normalizeCRPhone(waId));
+}
+function isBlocked(waId) {
+  return blockedSet.has(normalizeCRPhone(waId));
 }
 
 /**
@@ -481,6 +495,9 @@ function ensureMonthlyReset() {
   console.log(`🔄 Reset mensual: ${key}`);
   if (STATS_PERSIST) saveStatsToDisk();
 }
+function msgOutOfTokens() {
+  return `⚠️ Se acabaron las fichas del mes 🙌\n\nPara seguir, activá un pack: ${PACK_TOKENS} fichas por ₡${PACK_PRICE_CRC}`;
+}
 
 /**
  ============================
@@ -497,15 +514,19 @@ function addPendingQuote(session) {
 function removePendingQuote(waId) {
   pendingQuotes.delete(waId);
 }
+
 /**
  ============================
  SESIONES
  ============================
  */
+const CLOSE_AFTER_MS = SESSION_TIMEOUT_HOURS * 60 * 60 * 1000;
+
 function getSession(waId) {
-  if (!sessions.has(waId)) {
-    sessions.set(waId, {
-      waId,
+  const id = String(waId || "");
+  if (!sessions.has(id)) {
+    sessions.set(id, {
+      waId: id,
       state: "NEW",
       catalog_sent: false,
 
@@ -519,7 +540,6 @@ function getSession(waId) {
       close_timer: null,
       reminder_timer: null,
 
-      // ✅ “abandonados” 2h aplica aunque solo se haya enviado precio
       last_offer: null,
       last_offer_sent_at: null,
 
@@ -534,13 +554,13 @@ function getSession(waId) {
       ai_used_count: 0,
       message_history: [],
 
-      // ✅ para “Ya pagué” -> pide comprobante
       waiting_receipt: false,
     });
+
     account.metrics.new_contacts += 1;
     if (STATS_PERSIST) saveStatsToDisk();
   }
-  return sessions.get(waId);
+  return sessions.get(id);
 }
 
 function clearTimers(session) {
@@ -548,46 +568,6 @@ function clearTimers(session) {
   if (session.reminder_timer) clearTimeout(session.reminder_timer);
   session.close_timer = null;
   session.reminder_timer = null;
-}
-
-async function sendAbandonedReminder(session) {
-  // Solo si sigue “en el aire”
-  if (session.paused) return;
-  if (session.state !== "PRECIO_ENVIADO") return;
-  if (!session.last_offer) return;
-
-  const price = session.last_offer?.price || 0;
-  const shipping = session.last_offer?.shipping || 0;
-  const total = price + shipping;
-
-  await sendWhatsApp(
-    session.waId,
-    `Hola 🙌 ¿Seguís interesad@?\n\nPrecio: ₡${total.toLocaleString()}\nSi querés, podés reenviar la foto.`
-  );
-}
-
-function resetCloseTimer(session) {
-  clearTimers(session);
-
-  // ✅ Recordatorio abandonado a las 2h después de enviar precio (si queda en el aire)
-  if (PRO_REMINDER && session.state === "PRECIO_ENVIADO" && session.last_offer) {
-    session.reminder_timer = setTimeout(async () => {
-      await sendAbandonedReminder(session);
-    }, CLOSE_AFTER_MS);
-  }
-
-  // ✅ cierre de caso (2h) o (2h + 1h) si hay reminder activo
-  const closeDelay = PRO_REMINDER
-    ? CLOSE_AFTER_MS + 60 * 60 * 1000
-    : CLOSE_AFTER_MS;
-
-  session.close_timer = setTimeout(() => {
-    session.state = "CERRADO_TIMEOUT";
-    removePendingQuote(session.waId);
-    account.metrics.closed_timeout += 1;
-    if (SESSIONS_PERSIST) saveSessionsToDisk();
-    if (STATS_PERSIST) saveStatsToDisk();
-  }, closeDelay);
 }
 
 function resetCase(session) {
@@ -648,13 +628,13 @@ function generateSinpeReference(waId) {
  ============================
  RÁFAGA DE FOTOS (buffer)
  ============================
- */
 function handlePhotoBuffer(waId, imageId, caption, callback) {
   let buffer = photoBuffers.get(waId);
   if (!buffer) {
-    buffer = { photos: [], timer: null };
+    buffer = { photos: [], timer: null, last_seen: Date.now() };
     photoBuffers.set(waId, buffer);
   }
+  buffer.last_seen = Date.now();
 
   buffer.photos.push({ imageId, caption: String(caption || "") });
   if (buffer.timer) clearTimeout(buffer.timer);
@@ -765,9 +745,6 @@ function fraseNoRepetir(tipo, sessionId = "global") {
   lastUsed.set(key, elegida);
   return elegida;
 }
-function msgOutOfTokens() {
-  return `⚠️ Se acabaron las fichas del mes 🙌\n\nPara seguir, activá un pack: ${PACK_TOKENS} fichas por ₡${PACK_PRICE_CRC}`;
-}
 
 /**
  ============================
@@ -805,12 +782,7 @@ function detectDeliveryMethod(text) {
   const t = String(text || "").trim().toLowerCase();
   if (t.includes("envio") || t.includes("envío") || t === "si" || t === "sí")
     return "envio";
-  if (
-    t.includes("recoger") ||
-    t.includes("retiro") ||
-    t.includes("tienda") ||
-    t === "no"
-  )
+  if (t.includes("recoger") || t.includes("retiro") || t.includes("tienda") || t === "no")
     return "recoger";
   return null;
 }
@@ -846,9 +818,34 @@ async function waPost(payload, label = "WA") {
     const txt = await r.text();
     if (!r.ok) console.log(`❌ ${label} ERROR`, r.status, txt);
     else console.log(`✅ ${label} OK`, r.status, txt.slice(0, 200));
+
+    // ✅ ALERTA AL DUEÑO EN ERRORES CRÍTICOS
+    if (!r.ok && OWNER_PHONE) {
+      const s = String(r.status);
+      if (s.startsWith("4") || s.startsWith("5")) {
+        // evita spamear: solo 401/403/429/500+ (ajustable)
+        if ([401, 403, 429].includes(r.status) || r.status >= 500) {
+          try {
+            await sendWhatsApp(
+              normalizeCRPhone(OWNER_PHONE),
+              `⚠️ WhatsApp API falló (${label})\nStatus: ${r.status}\n${txt.slice(0, 160)}`
+            );
+          } catch {}
+        }
+      }
+    }
+
     return { ok: r.ok, status: r.status, text: txt };
   } catch (e) {
     console.log(`⚠️ ${label} EXCEPTION:`, e?.message);
+    if (OWNER_PHONE) {
+      try {
+        await sendWhatsApp(
+          normalizeCRPhone(OWNER_PHONE),
+          `⚠️ WhatsApp API excepción (${label}): ${String(e?.message || "error").slice(0, 160)}`
+        );
+      } catch {}
+    }
     return { ok: false, status: 0, text: String(e?.message || "error") };
   }
 }
@@ -945,9 +942,11 @@ async function sendList(toWaId, bodyText, buttonText, sectionTitle, rows) {
 async function notifyOwner(message, imageId = null) {
   console.log("📢 DUEÑO:", message);
   if (!OWNER_PHONE) return;
-  if (imageId) return sendImage(OWNER_PHONE, imageId, message);
-  return sendWhatsApp(OWNER_PHONE, message);
+  const owner = normalizeCRPhone(OWNER_PHONE);
+  if (imageId) return sendImage(owner, imageId, message);
+  return sendWhatsApp(owner, message);
 }
+
 /**
  ============================
  INBOX LIST (dueño) - viejos primero + paginación
@@ -1009,8 +1008,6 @@ async function showInboxList(ownerWaId, page = 0) {
 /**
  ============================
  CONFIRMACIONES DUEÑO (SI / NO / EDITAR)
- - Cada acción sensible se manda como “preview” al dueño
- - Dueño responde: SI | NO | EDITAR <texto nuevo>
  ============================
  */
 const ownerConfirm = new Map(); // key: ownerWaId -> { type, clientWaId, payload... }
@@ -1021,7 +1018,6 @@ function setOwnerConfirm(ownerWaId, data) {
 function getOwnerConfirm(ownerWaId) {
   const c = ownerConfirm.get(ownerWaId);
   if (!c) return null;
-  // TTL 10 min
   if (Date.now() - (c.created_at || 0) > 10 * 60 * 1000) {
     ownerConfirm.delete(ownerWaId);
     return null;
@@ -1043,8 +1039,8 @@ async function askOwnerConfirm(ownerWaId, previewText) {
 /**
  ============================
  PARSEO COMANDO DUEÑO (con número)
- - Cambios: 0 -> NO_HAY (mensaje “No hay”)
- - cat -> catálogo (sin tilde también)
+ - 0 -> NO_HAY
+ - cat -> catálogo
  - precio requiere número de cliente SIEMPRE
  ============================
  */
@@ -1053,7 +1049,7 @@ function parseOwnerCommand(text) {
   const parts = t.split(/\s+/);
   if (parts.length < 2) return null;
 
-  const clientNum = parts[0].replace(/[^\d]/g, "");
+  const clientNum = normalizeCRPhone(parts[0]);
   if (clientNum.length < 8) return null;
 
   const cmd = norm(parts[1]);
@@ -1098,89 +1094,87 @@ function parseOwnerCommand(text) {
 /**
  ============================
  HANDLER DUEÑO (inbox + resolve + acciones)
- - Añade confirmación SI/NO/EDITAR para:
-   PRECIO, NO_HAY, CATALOGO, PAGADO
+ - Confirmación SI/NO/EDITAR (si REQUIRE_OWNER_CONFIRM=1)
  ============================
  */
-async function handleOwnerCommand(waId, text) {
+async function handleOwnerCommand(ownerWaId, text) {
   const raw = String(text || "").trim();
   const tnorm = norm(raw);
 
-  // Confirmación rápida por botones
+  // ✅ Botones confirmación (interactive ids)
   if (tnorm === "owner_yes" || tnorm === "owner_no" || tnorm === "owner_edit") {
-    const pending = getOwnerConfirm(waId);
+    const pending = getOwnerConfirm(ownerWaId);
     if (!pending) {
-      await sendWhatsApp(waId, "ℹ️ No hay nada pendiente por confirmar.");
+      await sendWhatsApp(ownerWaId, "ℹ️ No hay nada pendiente por confirmar.");
       return true;
     }
 
     if (tnorm === "owner_no") {
-      clearOwnerConfirm(waId);
-      await sendWhatsApp(waId, "✅ Cancelado.");
+      clearOwnerConfirm(ownerWaId);
+      await sendWhatsApp(ownerWaId, "✅ Cancelado.");
       return true;
     }
 
     if (tnorm === "owner_edit") {
-      // El siguiente mensaje del dueño debe ser: EDITAR <nuevo texto>
-      await sendWhatsApp(waId, `Escribí:\nEDITAR <mensaje nuevo>`);
+      await sendWhatsApp(ownerWaId, `Escribí:\nEDITAR <mensaje nuevo>`);
       return true;
     }
 
     // OWNER_YES
-    const ok = await executeOwnerAction(waId, pending, null);
-    if (ok) clearOwnerConfirm(waId);
+    const ok = await executeOwnerAction(ownerWaId, pending, null);
+    if (ok) clearOwnerConfirm(ownerWaId);
     return true;
   }
 
-  // EDITAR <texto>
+  // ✅ EDITAR <texto>
   if (tnorm.startsWith("editar ")) {
-    const pending = getOwnerConfirm(waId);
+    const pending = getOwnerConfirm(ownerWaId);
     if (!pending) {
-      await sendWhatsApp(waId, "ℹ️ No hay nada pendiente por editar.");
+      await sendWhatsApp(ownerWaId, "ℹ️ No hay nada pendiente por editar.");
       return true;
     }
     const newText = raw.slice(7).trim();
     if (!newText) {
-      await sendWhatsApp(waId, "⚠️ Pegá el mensaje nuevo después de EDITAR.");
+      await sendWhatsApp(ownerWaId, "⚠️ Pegá el mensaje nuevo después de EDITAR.");
       return true;
     }
-    const ok = await executeOwnerAction(waId, pending, newText);
-    if (ok) clearOwnerConfirm(waId);
+    const ok = await executeOwnerAction(ownerWaId, pending, newText);
+    if (ok) clearOwnerConfirm(ownerWaId);
     return true;
   }
 
   // Inbox / pendientes
   if (tnorm === "pendientes" || tnorm === "inbox") {
-    await showInboxList(waId, 0);
+    await showInboxList(ownerWaId, 0);
     return true;
   }
   if (tnorm.startsWith("inbox_next_")) {
     const nextPage = Number(raw.replace(/^INBOX_NEXT_/i, "")) || 0;
-    await showInboxList(waId, nextPage);
+    await showInboxList(ownerWaId, nextPage);
     return true;
   }
   if (tnorm.startsWith("inbox_prev_")) {
     const prevPage = Number(raw.replace(/^INBOX_PREV_/i, "")) || 0;
-    await showInboxList(waId, prevPage);
+    await showInboxList(ownerWaId, prevPage);
     return true;
   }
   if (tnorm === "inbox_back") {
-    await showInboxList(waId, getOwnerPage(waId));
+    await showInboxList(ownerWaId, getOwnerPage(ownerWaId));
     return true;
   }
   if (tnorm.startsWith("resolve_")) {
-    const num = raw.replace(/^RESOLVE_/i, "").replace(/[^\d]/g, "");
+    const num = normalizeCRPhone(raw.replace(/^RESOLVE_/i, ""));
     if (pendingQuotes.has(num)) {
       removePendingQuote(num);
-      await sendWhatsApp(waId, `✅ Marcado como resuelto: ${num}`);
+      await sendWhatsApp(ownerWaId, `✅ Marcado como resuelto: ${num}`);
     } else {
-      await sendWhatsApp(waId, `ℹ️ Ese pendiente ya no está: ${num}`);
+      await sendWhatsApp(ownerWaId, `ℹ️ Ese pendiente ya no está: ${num}`);
     }
-    await showInboxList(waId, getOwnerPage(waId));
+    await showInboxList(ownerWaId, getOwnerPage(ownerWaId));
     return true;
   }
   if (tnorm.startsWith("pend_")) {
-    const num = raw.replace(/^PEND_/i, "").replace(/[^\d]/g, "");
+    const num = normalizeCRPhone(raw.replace(/^PEND_/i, ""));
     const p = pendingQuotes.get(num);
     const details = p?.details ? `📝 ${p.details}\n\n` : "";
 
@@ -1195,7 +1189,7 @@ ${num} 0
 ${num} pagado
 ${num} cat`;
 
-    await sendButtons(waId, msg, [
+    await sendButtons(ownerWaId, msg, [
       { id: `RESOLVE_${num}`, title: "✅ Resuelto" },
       { id: "INBOX_BACK", title: "📥 Pendientes" },
     ]);
@@ -1205,11 +1199,11 @@ ${num} cat`;
   // Parse comando con número
   const cmd = parseOwnerCommand(raw);
   if (!cmd) {
-    // ✅ Si el dueño escribió SOLO “7500” sin número, avisar
+    // Si el dueño escribió solo “7500”
     const onlyPrice = raw.replace(/[^\d]/g, "");
     if (onlyPrice.length >= 3 && onlyPrice.length <= 6) {
       await sendWhatsApp(
-        waId,
+        ownerWaId,
         `⚠️ Te faltó el número del cliente.\nEj: 506XXXXXXXX ${onlyPrice}`
       );
       return true;
@@ -1217,9 +1211,30 @@ ${num} cat`;
     return false;
   }
 
-  // Previews + confirm
   const clientSession = getSession(cmd.clientWaId);
 
+  // Acciones sin confirm (pausa / reanudar)
+  if (cmd.type === "PAUSA") {
+    clientSession.paused = true;
+    await sendWhatsApp(
+      ownerWaId,
+      `⏸️ Bot pausado para ${cmd.clientWaId}. Reanudar: ${cmd.clientWaId} bot`
+    );
+    return true;
+  }
+  if (cmd.type === "REANUDAR") {
+    clientSession.paused = false;
+    await sendWhatsApp(ownerWaId, `▶️ Bot reanudado para ${cmd.clientWaId}`);
+    return true;
+  }
+
+  // Si no requerís confirmación, ejecuta directo
+  if (!REQUIRE_OWNER_CONFIRM) {
+    await executeOwnerAction(ownerWaId, cmd, null);
+    return true;
+  }
+
+  // Previews + confirmación
   if (cmd.type === "PRECIO") {
     const { price, shipping } = cmd;
     const total = price + (shipping || 0);
@@ -1230,46 +1245,84 @@ ${num} cat`;
       (shipping ? `\nEnvío: ₡${Number(shipping).toLocaleString()}` : "") +
       `\nTotal: ₡${total.toLocaleString()}`;
 
-    setOwnerConfirm(waId, { type: "PRECIO", clientWaId: cmd.clientWaId, price, shipping: shipping || 0 });
-    await askOwnerConfirm(waId, preview);
+    setOwnerConfirm(ownerWaId, {
+      type: "PRECIO",
+      clientWaId: cmd.clientWaId,
+      price,
+      shipping: shipping || 0,
+    });
+    await askOwnerConfirm(ownerWaId, preview);
     return true;
   }
 
   if (cmd.type === "NO_HAY") {
     const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar "No hay"`;
-    setOwnerConfirm(waId, { type: "NO_HAY", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(waId, preview);
+    setOwnerConfirm(ownerWaId, { type: "NO_HAY", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(ownerWaId, preview);
     return true;
   }
 
   if (cmd.type === "PAGADO") {
     const preview = `Cliente: ${cmd.clientWaId}\nAcción: Confirmar pago (pagado)`;
-    setOwnerConfirm(waId, { type: "PAGADO", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(waId, preview);
+    setOwnerConfirm(ownerWaId, { type: "PAGADO", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(ownerWaId, preview);
     return true;
   }
 
   if (cmd.type === "CATALOGO") {
     const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar catálogo`;
-    setOwnerConfirm(waId, { type: "CATALOGO", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(waId, preview);
-    return true;
-  }
-
-  // Acciones sin confirm (pausa / reanudar)
-  if (cmd.type === "PAUSA") {
-    clientSession.paused = true;
-    await sendWhatsApp(waId, `⏸️ Bot pausado para ${cmd.clientWaId}. Reanudar: ${cmd.clientWaId} bot`);
-    return true;
-  }
-
-  if (cmd.type === "REANUDAR") {
-    clientSession.paused = false;
-    await sendWhatsApp(waId, `▶️ Bot reanudado para ${cmd.clientWaId}`);
+    setOwnerConfirm(ownerWaId, { type: "CATALOGO", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(ownerWaId, preview);
     return true;
   }
 
   return false;
+}
+
+/**
+ ============================
+ ABANDONADOS + CIERRE (solo 1 resetCloseTimer ✅)
+ ============================
+ */
+function scheduleAbandonedReminder(session) {
+  if (!PRO_REMINDER) return;
+
+  if (session.reminder_timer) clearTimeout(session.reminder_timer);
+
+  // Solo si ya se envió precio y no hay respuesta
+  if (session.state !== "PRECIO_ENVIADO" || !session.last_offer) return;
+
+  session.reminder_timer = setTimeout(async () => {
+    if (session.paused) return;
+    if (session.state !== "PRECIO_ENVIADO") return;
+
+    const offer = session.last_offer || {};
+    const total = Number(offer.price || 0) + Number(offer.shipping || 0);
+
+    await sendWhatsApp(
+      session.waId,
+      `Hola 🙌 ¿Seguís interesad@?\nTotal: ₡${total.toLocaleString()}\n\nSi querés, reenviame la foto y lo revisamos de nuevo.`
+    );
+  }, ABANDONED_REMINDER_MS);
+}
+
+function resetCloseTimer(session) {
+  if (session.close_timer) clearTimeout(session.close_timer);
+  if (session.reminder_timer) clearTimeout(session.reminder_timer);
+
+  // Reminder a las X horas si quedó en PRECIO_ENVIADO
+  scheduleAbandonedReminder(session);
+
+  // Cierre del caso: 2h (o 3h si PRO_REMINDER activo para dar ventana extra)
+  const closeDelay = PRO_REMINDER ? CLOSE_AFTER_MS + 60 * 60 * 1000 : CLOSE_AFTER_MS;
+
+  session.close_timer = setTimeout(() => {
+    session.state = "CERRADO_TIMEOUT";
+    removePendingQuote(session.waId);
+    account.metrics.closed_timeout += 1;
+    if (SESSIONS_PERSIST) saveSessionsToDisk();
+    if (STATS_PERSIST) saveStatsToDisk();
+  }, closeDelay);
 }
 
 /**
@@ -1287,29 +1340,28 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
   if (action.type === "PRECIO") {
     const price = Number(action.price || 0);
     const shipping = Number(action.shipping || 0);
+
     clientSession.last_offer = { price, shipping };
     clientSession.last_offer_sent_at = Date.now();
     clientSession.state = "PRECIO_ENVIADO";
+
     account.metrics.quotes_sent += 1;
     if (STATS_PERSIST) saveStatsToDisk();
 
     const total = price + shipping;
 
-    // Mensaje default (o editado por el dueño)
     const msg =
       overrideText ||
       `${fraseNoRepetir("si_hay", clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}` +
         (shipping ? `\nEnvío: ₡${shipping.toLocaleString()}` : "") +
         `\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`;
 
-    // botones al cliente
     await sendButtons(clientWaId, msg, [
       { id: "BTN_YES", title: "Sí, lo quiero" },
       { id: "BTN_NO", title: "No, gracias" },
       { id: "BTN_MORE", title: "Enviar otra foto" },
     ]);
 
-    // confirm al dueño
     await sendWhatsApp(ownerWaId, `✅ Listo: precio enviado a ${clientWaId}`);
     resetCloseTimer(clientSession);
     return true;
@@ -1333,7 +1385,6 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
       await sendWhatsApp(ownerWaId, `⚠️ No hay catálogo configurado`);
       return true;
     }
-
     const msg = overrideText || `¡Hola! ${catalogMsg} 🙌`;
     await sendWhatsApp(clientWaId, msg);
     await sendWhatsApp(ownerWaId, `✅ Listo: catálogo enviado a ${clientWaId}`);
@@ -1348,6 +1399,7 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
     clientSession.state = "PAGO_CONFIRMADO";
     account.metrics.sinpe_confirmed += 1;
     if (STATS_PERSIST) saveStatsToDisk();
+
     cancelSinpeWaitTimer(clientWaId);
 
     const deliveryMsg =
@@ -1363,95 +1415,10 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
 
     await sendWhatsApp(clientWaId, msg);
     await sendWhatsApp(ownerWaId, `✅ Listo: pago confirmado a ${clientWaId}`);
-
-    // ❌ NO auto-seguimiento 24h (por cobro). Se elimina el reset tardío.
-    // Solo reset cuando el cliente vuelva a escribir o cuando el dueño use RESOLVE / nuevo caso.
     return true;
   }
 
   return true;
-}
-/**
- ============================
- VIP + BLOQUEADOS + ETIQUETAS
- ============================
- */
-const VIP_NUMBERS = (process.env.VIP_NUMBERS || "")
-  .split(",")
-  .map((x) => waDigits(x))
-  .filter(Boolean);
-
-const BLOCKED_NUMBERS = (process.env.BLOCKED_NUMBERS || "")
-  .split(",")
-  .map((x) => waDigits(x))
-  .filter(Boolean);
-
-const vipSet = new Set(VIP_NUMBERS);
-const blockedSet = new Set(BLOCKED_NUMBERS);
-
-function isVIP(waId) {
-  return vipSet.has(waDigits(waId));
-}
-function isBlocked(waId) {
-  return blockedSet.has(waDigits(waId));
-}
-
-/**
- ============================
- RECORDATORIO CHAT ABANDONADO (2h)
- - Aplica cuando se envió precio y el cliente NO responde (ni sí ni no)
- - NO usa 24h (evita cobro extra/seguimiento largo)
- ============================
- */
-const ABANDONED_REMINDER_HOURS = Number(
-  process.env.ABANDONED_REMINDER_HOURS || 2
-);
-const ABANDONED_REMINDER_MS = ABANDONED_REMINDER_HOURS * 60 * 60 * 1000;
-
-function scheduleAbandonedReminder(session) {
-  if (!PRO_REMINDER) return;
-  if (session.reminder_timer) clearTimeout(session.reminder_timer);
-
-  // Solo si ya se envió precio y no hay respuesta
-  if (session.state !== "PRECIO_ENVIADO" || !session.last_offer) return;
-
-  session.reminder_timer = setTimeout(async () => {
-    if (session.state !== "PRECIO_ENVIADO") return;
-    const offer = session.last_offer || {};
-    const total = Number(offer.price || 0) + Number(offer.shipping || 0);
-
-    await sendWhatsApp(
-      session.waId,
-      `Hola 🙌 ¿Seguís interesad@?\nTotal: ₡${total.toLocaleString()}\n\nSi querés, reenviame la foto y lo revisamos de nuevo.`
-    );
-  }, ABANDONED_REMINDER_MS);
-}
-
-/**
- ============================
- AJUSTE resetCloseTimer:
- - Mantiene cierre a 2h (o 3h si PRO_REMINDER ya estaba sumando 1h)
- - Agrega recordatorio a las 2h (ABANDONED_REMINDER_HOURS)
- ============================
- */
-function resetCloseTimer(session) {
-  if (session.close_timer) clearTimeout(session.close_timer);
-  if (session.reminder_timer) clearTimeout(session.reminder_timer);
-
-  // Recordatorio 2h si quedó en el aire después de precio
-  scheduleAbandonedReminder(session);
-
-  const closeDelay = PRO_REMINDER
-    ? CLOSE_AFTER_MS + 60 * 60 * 1000
-    : CLOSE_AFTER_MS;
-
-  session.close_timer = setTimeout(() => {
-    session.state = "CERRADO_TIMEOUT";
-    removePendingQuote(session.waId);
-    account.metrics.closed_timeout += 1;
-    if (SESSIONS_PERSIST) saveSessionsToDisk();
-    if (STATS_PERSIST) saveStatsToDisk();
-  }, closeDelay);
 }
 
 /**
@@ -1537,18 +1504,20 @@ Devolvé SOLO JSON:
     return null;
   }
 }
-
 /**
  ============================
  HANDLER CLIENTE (COMPLETO)
- - VIP: se deriva al dueño sin bot
+ - VIP: deriva al dueño sin bot
  - Bloqueados: ignora
- - SINPE: envía # y nombre + pide comprobante EN UN SOLO MENSAJE
- - Comprobante: si llega foto estando ESPERANDO_SINPE -> se reenvía al dueño
+ - SINPE: manda # + nombre + pide comprobante en un solo mensaje
+ - Comprobante: si llega foto estando ESPERANDO_SINPE -> reenvía al dueño
  ============================
  */
-async function handleClientMessage(waId, text, hasImage, imageId) {
+async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
   ensureMonthlyReset();
+
+  const waId = normalizeCRPhone(waIdRaw);
+  let text = String(textRaw || "").trim();
 
   const session = getSession(waId);
   session.last_activity = Date.now();
@@ -1563,15 +1532,24 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
   if (text === "BTN_RECOGER") text = "recoger";
   if (text === "BTN_YAPAGUE") text = "ya pague";
 
-  // Bloqueados
-  if (isBlocked(waId)) return;
+  // ✅ Bloqueados (por ENV o por profile)
+  const prof = getProfile(waId);
+  if (isBlocked(waId) || prof.blocked) {
+    account.metrics.blocked_hits += 1;
+    if (STATS_PERSIST) saveStatsToDisk();
+    return;
+  }
 
-  // VIP: bypass bot (manda todo al dueño y el bot no responde automático)
-  if (isVIP(waId)) {
+  // ✅ VIP (por ENV o por profile): bypass bot
+  if (isVIP(waId) || prof.vip) {
+    account.metrics.vip_routed += 1;
+    if (STATS_PERSIST) saveStatsToDisk();
+
+    const msgTxt = String(text || "").trim() || "(sin texto)";
     if (hasImage && imageId) {
-      await notifyOwner(`⭐ VIP: ${waId}\n📸 Mensaje con foto\n📝 ${String(text || "").trim() || "(sin texto)"}`, imageId);
+      await notifyOwner(`⭐ VIP: ${waId}\n📸 Mensaje con foto\n📝 ${msgTxt}`, imageId);
     } else {
-      await notifyOwner(`⭐ VIP: ${waId}\n📝 ${String(text || "").trim() || "(sin texto)"}`);
+      await notifyOwner(`⭐ VIP: ${waId}\n📝 ${msgTxt}`);
     }
     return;
   }
@@ -1603,10 +1581,16 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   /**
    * ✅ COMPROBANTE SINPE:
-   * Si la sesión está esperando SINPE y entra una imagen => se trata como comprobante
+   * Si está ESPERANDO_SINPE y entra imagen => es comprobante
    */
   if (hasImage && session.state === "ESPERANDO_SINPE" && imageId) {
-    await sendWhatsApp(waId, "¡Listo! 🙌 Recibí el comprobante. Ya se lo paso al encargado para revisión.");
+    account.metrics.receipts_forwarded += 1;
+    if (STATS_PERSIST) saveStatsToDisk();
+
+    await sendWhatsApp(
+      waId,
+      "¡Listo! 🙌 Recibí el comprobante. Ya se lo paso al encargado para revisión."
+    );
     await notifyOwner(
       `🧾 COMPROBANTE SINPE\n📱 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference || "(sin ref)"}\n💵 Esperado: ₡${(session.pending_sinpe?.expectedAmount || 0).toLocaleString()}\n\nSi está OK, respondé:\n${waId} pagado`,
       imageId
@@ -1666,14 +1650,13 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   addToMessageHistory(session, "user", String(text || ""));
 
-  // Si está esperando confirmación del vendedor, no respondes más
+  // Si está esperando confirmación del vendedor, no responde más
   if (session.state === "ESPERANDO_CONFIRMACION_VENDEDOR") return;
 
   /**
    * Estado: PRECIO_ENVIADO
    */
   if (session.state === "PRECIO_ENVIADO") {
-    // Si contesta cualquier cosa (sí/no/otra), reinicia timers
     resetCloseTimer(session);
 
     if (isYes(text)) {
@@ -1758,7 +1741,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   /**
    * Estado: PIDIENDO_DATOS / PIDIENDO_DATOS_RECOGER
-   * ✅ Aquí se manda SINPE + nombre + pide comprobante en un solo mensaje
+   * ✅ manda SINPE + nombre + pide comprobante
    */
   if (session.state === "PIDIENDO_DATOS" || session.state === "PIDIENDO_DATOS_RECOGER") {
     session.shipping_details = String(text || "");
@@ -1796,40 +1779,26 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   /**
    * Estado: ESPERANDO_SINPE (texto)
+   * - Si dice “ya pagué” sin foto: pedir comprobante
    */
- if (session.state === "ESPERANDO_SINPE") {
-  const lower = norm(text);
+  if (session.state === "ESPERANDO_SINPE") {
+    const lower = norm(text);
 
-  const saysPaid =
-    lower.includes("listo") ||
-    lower.includes("pague") ||
-    lower.includes("pagué") ||
-    lower.includes("transferi") ||
-    lower.includes("transferí") ||
-    lower === "ya pague" ||
-    lower === "ya pagué" ||
-    lower.includes("ya");
+    const saysPaid =
+      lower.includes("listo") ||
+      lower.includes("pague") ||
+      lower.includes("transferi") ||
+      lower === "ya pague" ||
+      lower.includes("ya");
 
-  // 🚨 DICE QUE PAGÓ PERO NO MANDÓ FOTO
-  if (saysPaid && !hasImage) {
-    await sendWhatsApp(
-      waId,
-      "Listo 🙌 Para validar el pago, tenés que *adjuntar la foto del comprobante SINPE* aquí mismo 🧾📸\n\nEnviála en un solo mensaje por favor."
-    );
-    return;
+    if (saysPaid) {
+      await sendWhatsApp(
+        waId,
+        "Listo 🙌 Para validar el pago, tenés que *adjuntar la foto del comprobante SINPE* aquí mismo 🧾📸\n\nEnviála en un solo mensaje por favor."
+      );
+      return;
+    }
   }
-
-  // 📸 SI MANDÓ FOTO DEL COMPROBANTE
-  if (hasImage) {
-    await sendWhatsApp(waId, "Recibido 🙌 Déjame verificar el comprobante.");
-    await notifyOwner(
-      `🧾 Comprobante SINPE recibido\n📱 ${waId}\n🔑 Ref: ${session.sinpe_reference}`,
-      imageId
-    );
-    return;
-  }
-}
-
 
   /**
    * FAQs rápidas
@@ -1912,71 +1881,73 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 /**
  ============================
  WEBHOOKS + ENDPOINTS
+ - ✅ Responde 200 rápido y procesa async (evita reintentos Meta)
+ - ✅ Recorre entry[]/changes[] correctamente
  ============================
  */
-app.post("/webhook", async (req, res) => {
-  console.log("📥 WEBHOOK ENTRADA");
-  console.log("Headers x-hub-signature-256:", req.headers["x-hub-signature-256"]);
-  console.log("Body sample:", JSON.stringify(req.body).slice(0, 400));
+app.post("/webhook", (req, res) => {
+  res.sendStatus(200);
 
-  try {
-    if (!verifyMetaSignature(req)) {
-      console.log("⚠️ Firma Meta inválida");
-      return res.sendStatus(403);
-    }
-
-    const messages = req.body?.entry?.[0]?.changes?.[0]?.value?.messages;
-    if (!messages) return res.sendStatus(200);
-
-    const ownerDigits = waDigits(OWNER_PHONE);
-
-    for (const msg of messages) {
-      const msgId = msg?.id;
-      if (isDuplicateMessage(msgId)) {
-        console.log("🔁 Duplicado ignorado:", msgId);
-        continue;
+  (async () => {
+    try {
+      if (!verifyMetaSignature(req)) {
+        console.log("⚠️ Firma Meta inválida");
+        return;
       }
 
-      const waId = waDigits(msg.from);
+      const ownerDigits = normalizeCRPhone(OWNER_PHONE);
 
-      // Dueño
-      if (ownerDigits && waId === ownerDigits) {
-        if (msg.type === "text") {
-          await handleOwnerCommand(ownerDigits, msg.text?.body || "");
-        } else if (msg.type === "interactive") {
-          const i = msg.interactive;
-          const id = i?.button_reply?.id || i?.list_reply?.id || "";
-          await handleOwnerCommand(ownerDigits, id);
+      const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+      for (const entry of entries) {
+        const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+        for (const ch of changes) {
+          const messages = ch?.value?.messages;
+          if (!Array.isArray(messages)) continue;
+
+          for (const msg of messages) {
+            const msgId = msg?.id;
+            if (isDuplicateMessage(msgId)) continue;
+
+            const from = normalizeCRPhone(msg.from);
+
+            // Dueño
+            if (ownerDigits && from === ownerDigits) {
+              if (msg.type === "text") {
+                await handleOwnerCommand(ownerDigits, msg.text?.body || "");
+              } else if (msg.type === "interactive") {
+                const i = msg.interactive;
+                const id = i?.button_reply?.id || i?.list_reply?.id || "";
+                await handleOwnerCommand(ownerDigits, id);
+              }
+              continue;
+            }
+
+            // Cliente
+            let text = "";
+            let hasImage = false;
+            let imageId = null;
+
+            if (msg.type === "text") {
+              text = msg.text?.body || "";
+            } else if (msg.type === "image") {
+              hasImage = true;
+              imageId = msg.image?.id;
+              text = msg.image?.caption || "";
+            } else if (msg.type === "interactive") {
+              const i = msg.interactive;
+              text = i?.button_reply?.id || i?.list_reply?.id || "";
+            } else {
+              continue;
+            }
+
+            await handleClientMessage(from, text, hasImage, imageId);
+          }
         }
-        continue;
       }
-
-      // Cliente
-      let text = "";
-      let hasImage = false;
-      let imageId = null;
-
-      if (msg.type === "text") {
-        text = msg.text?.body || "";
-      } else if (msg.type === "image") {
-        hasImage = true;
-        imageId = msg.image?.id;
-        text = msg.image?.caption || "";
-      } else if (msg.type === "interactive") {
-        const i = msg.interactive;
-        text = i?.button_reply?.id || i?.list_reply?.id || "";
-      } else {
-        continue;
-      }
-
-      await handleClientMessage(waId, text, hasImage, imageId);
+    } catch (e) {
+      console.error("❌ Webhook async error:", e);
     }
-
-    return res.sendStatus(200);
-  } catch (e) {
-    console.error("❌ Webhook:", e);
-    return res.sendStatus(500);
-  }
+  })();
 });
 
 app.get("/webhook", (req, res) => {
@@ -1998,6 +1969,7 @@ app.get("/health", (req, res) => {
 app.get("/status", (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY)
     return res.status(401).send("Unauthorized");
+
   ensureMonthlyReset();
 
   const activeSessions = Array.from(sessions.values()).filter(
@@ -2027,9 +1999,10 @@ app.get("/status", (req, res) => {
       persist: {
         sessions: SESSIONS_PERSIST ? "✅" : "❌",
         stats: STATS_PERSIST ? "✅" : "❌",
+        profiles: PROFILES_PERSIST ? "✅" : "❌",
       },
       premium: {
-        confirm_owner: "✅ (SI/NO/EDITAR)",
+        confirm_owner: REQUIRE_OWNER_CONFIRM ? "✅" : "❌",
         abandoned_reminder: PRO_REMINDER ? `✅ (${ABANDONED_REMINDER_HOURS}h)` : "❌",
         vip: vipSet.size,
         blocked: blockedSet.size,
@@ -2064,7 +2037,56 @@ app.get("/", (req, res) => {
   );
 });
 
-// Keep-alive
+/**
+ ============================
+ GARBAGE COLLECTOR (memoria)
+ ============================
+ */
+const GC_INTERVAL_MS = 10 * 60 * 1000;
+const SESSION_GC_MS = 6 * 60 * 60 * 1000; // sesiones inactivas 6h
+const PHOTO_GC_MS = 2 * 60 * 1000; // buffers viejos
+const OWNER_CONFIRM_TTL_MS = 10 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+
+  // sessions viejas cerradas/inactivas
+  for (const [id, s] of sessions.entries()) {
+    const inactive = now - (s.last_activity || 0) > SESSION_GC_MS;
+    const closed = s.state === "CERRADO_TIMEOUT";
+    if (inactive && closed) {
+      clearTimers(s);
+      sessions.delete(id);
+    }
+  }
+
+  // photo buffers viejos
+  for (const [id, b] of photoBuffers.entries()) {
+    if (!b) continue;
+    const lastSeen = Number(b.last_seen || 0);
+    if (lastSeen && now - lastSeen > PHOTO_GC_MS) {
+      if (b.timer) clearTimeout(b.timer);
+      photoBuffers.delete(id);
+    }
+  }
+
+  // owner confirm TTL
+  for (const [id, c] of ownerConfirm.entries()) {
+    if (!c) continue;
+    if (now - (c.created_at || 0) > OWNER_CONFIRM_TTL_MS) ownerConfirm.delete(id);
+  }
+
+  // processedMsgIds TTL (doble seguro)
+  for (const [id, ts] of processedMsgIds.entries()) {
+    if (now - ts > DEDUPE_TTL_MS) processedMsgIds.delete(id);
+  }
+}, GC_INTERVAL_MS);
+
+/**
+ ============================
+ KEEP-ALIVE
+ ============================
+ */
 setInterval(() => {
   console.log("⏰ Keep-alive");
 }, 5 * 60 * 1000);
@@ -2076,25 +2098,25 @@ setInterval(() => {
  */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+  loadProfilesFromDisk();
   loadSessionsFromDisk();
-  loadStatsFromDisk();
+  loadStatsToDisk?.(); // si no existe, no hace nada
+  loadStatsFromDisk?.(); // compat
+  loadStatsFromDisk && loadStatsFromDisk();
 
   console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
   console.log(
     `\n🤖 TICO-BOT | Puerto ${PORT} | ${STORE_NAME} (${STORE_TYPE})\n` +
       `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
-      `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${
-        SESSIONS_PERSIST ? "ON" : "OFF"
-      } | M=${STATS_PERSIST ? "ON" : "OFF"}\n` +
+      `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${SESSIONS_PERSIST ? "ON" : "OFF"} | M=${STATS_PERSIST ? "ON" : "OFF"} | P=${PROFILES_PERSIST ? "ON" : "OFF"}\n` +
       `🌐 Graph API: ${GRAPH_API_VERSION}\n` +
-      `⭐ VIP: ${vipSet.size} | ⛔ Bloqueados: ${blockedSet.size} | ✅ Confirm: ON\n`
+      `⭐ VIP: ${vipSet.size} | ⛔ Bloqueados: ${blockedSet.size} | ✅ Confirm: ${REQUIRE_OWNER_CONFIRM ? "ON" : "OFF"}\n`
   );
 
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
     console.log("⚠️ Modo SIM activo: faltan WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID");
   }
-  if (OWNER_PHONE && waDigits(OWNER_PHONE).length < 10) {
+  if (OWNER_PHONE && normalizeCRPhone(OWNER_PHONE).length < 10) {
     console.log("⚠️ OWNER_PHONE parece corto. Recomendado: 506XXXXXXXX (sin +)");
   }
 });
-
