@@ -5,29 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="theme-color" content="#075E54">
-  <title>TICO-bot Panel Pro</title>
+  <meta name="theme-color" content="#1a1f25">
+  <title>TICObot Panel</title>
   <link rel="manifest" href="/manifest.json">
   <style>
     :root {
-      --primary: #075E54;
-      --primary-light: #25D366;
-      --primary-dark: #054d44;
-      --accent: #34B7F1;
-      --bg: #ECE5DD;
-      --bg-dark: #0d1418;
+      --primary: #1a1f25;
+      --primary-light: #2d9cdb;
+      --primary-dark: #0f1318;
+      --accent: #00d4aa;
+      --accent-blue: #2d9cdb;
+      --bg: #f0f2f5;
+      --bg-dark: #0f1318;
       --card: #ffffff;
-      --card-dark: #1f2c34;
-      --text: #111b21;
+      --card-dark: #1a1f25;
+      --text: #1a1f25;
       --text-dark: #e9edef;
       --text-muted: #667781;
       --danger: #E74C3C;
-      --success: #27AE60;
+      --success: #00d4aa;
       --warning: #F39C12;
-      --bubble-out: #d9fdd3;
+      --bubble-out: #d4f4eb;
       --bubble-in: #ffffff;
-      --bubble-out-dark: #005c4b;
-      --bubble-in-dark: #1f2c34;
+      --bubble-out-dark: #0a3d2e;
+      --bubble-in-dark: #1a1f25;
+      --gradient: linear-gradient(135deg, #2d9cdb 0%, #00d4aa 100%);
     }
     
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -52,7 +54,7 @@
     #login {
       position: fixed;
       inset: 0;
-      background: linear-gradient(135deg, var(--primary) 0%, #1F2C34 100%);
+      background: var(--primary);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -60,26 +62,30 @@
       z-index: 1000;
     }
     #login.hidden { display: none; }
-    .login-logo { font-size: 5rem; margin-bottom: 0.5rem; animation: bounce 1s infinite; }
-    @keyframes bounce {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(-10px); }
+    .login-logo { 
+      width: 200px; 
+      height: auto; 
+      margin-bottom: 2rem;
+      animation: fadeIn 0.5s ease-out;
     }
-    .login-title { color: #fff; font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; }
-    .login-subtitle { color: rgba(255,255,255,0.7); font-size: 0.95rem; margin-bottom: 2rem; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .login-subtitle { color: rgba(255,255,255,0.6); font-size: 0.95rem; margin-bottom: 2rem; }
     .pin-box { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; }
     .pin-digit {
       width: 55px; height: 65px;
       font-size: 1.8rem; text-align: center;
-      border: 2px solid rgba(255,255,255,0.3);
+      border: 2px solid rgba(255,255,255,0.2);
       border-radius: 16px;
-      background: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
       color: #fff; outline: none;
       transition: all 0.2s;
     }
-    .pin-digit:focus { border-color: var(--primary-light); background: rgba(255,255,255,0.2); transform: scale(1.05); }
+    .pin-digit:focus { border-color: var(--accent); background: rgba(255,255,255,0.1); transform: scale(1.05); }
     .login-btn {
-      background: var(--primary-light);
+      background: var(--gradient);
       color: #fff; border: none;
       padding: 1rem 4rem;
       font-size: 1.1rem; font-weight: 600;
@@ -87,7 +93,7 @@
       cursor: pointer;
       transition: all 0.2s;
     }
-    .login-btn:hover { transform: scale(1.05); }
+    .login-btn:hover { transform: scale(1.05); box-shadow: 0 4px 20px rgba(45, 156, 219, 0.4); }
     .login-btn:disabled { opacity: 0.5; transform: none; }
     .login-error { color: #FF6B6B; margin-top: 1rem; font-size: 0.9rem; }
     
@@ -102,13 +108,13 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
     }
     .header-left { display: flex; align-items: center; gap: 0.5rem; }
     .header-title { font-size: 1.2rem; font-weight: 700; }
     .header-right { display: flex; align-items: center; gap: 0.75rem; }
     .header-badge {
-      background: rgba(255,255,255,0.2);
+      background: var(--gradient);
       padding: 0.4rem 0.8rem;
       border-radius: 20px;
       font-size: 0.85rem;
@@ -123,13 +129,13 @@
       background: var(--danger);
       transition: background 0.3s;
     }
-    .status-dot.online { background: var(--primary-light); animation: pulse 2s infinite; }
+    .status-dot.online { background: var(--accent); animation: pulse 2s infinite; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.5; }
     }
     .dark-toggle {
-      background: rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.15);
       border: none;
       padding: 0.5rem;
       border-radius: 50%;
@@ -142,35 +148,45 @@
     /* === TABS === */
     .tabs {
       display: flex;
-      background: var(--card);
-      border-bottom: 1px solid rgba(0,0,0,0.1);
+      background: var(--primary);
+      padding: 0.5rem;
+      gap: 0.4rem;
       position: sticky;
       top: 52px;
       z-index: 99;
     }
     .tab {
       flex: 1;
-      padding: 0.9rem 0.5rem;
+      padding: 0.7rem 0.3rem;
       text-align: center;
       border: none;
-      background: none;
-      font-size: 0.85rem;
-      font-weight: 500;
-      color: var(--text-muted);
+      background: rgba(255,255,255,0.15);
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: rgba(255,255,255,0.8);
       cursor: pointer;
-      border-bottom: 3px solid transparent;
+      border-radius: 10px;
       transition: all 0.2s;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 0.3rem;
+      gap: 0.2rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
-    .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+    .tab:hover { background: rgba(255,255,255,0.25); }
+    .tab.active { 
+      background: #fff; 
+      color: var(--primary); 
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    .tab-icon { font-size: 1.3rem; }
     .tab-badge {
       background: var(--danger);
       color: #fff;
-      font-size: 0.7rem;
-      padding: 0.15rem 0.5rem;
+      font-size: 0.6rem;
+      padding: 0.1rem 0.4rem;
       border-radius: 10px;
       font-weight: 700;
       animation: pop 0.3s;
@@ -289,11 +305,11 @@
       gap: 0.4rem;
     }
     .btn:active { transform: scale(0.95); }
-    .btn-primary { background: var(--primary-light); color: #fff; grid-column: span 2; }
-    .btn-primary:hover { background: var(--primary); }
+    .btn-primary { background: var(--gradient); color: #fff; grid-column: span 2; }
+    .btn-primary:hover { box-shadow: 0 4px 15px rgba(45, 156, 219, 0.4); }
     .btn-danger { background: var(--danger); color: #fff; }
     .btn-danger:hover { background: #c0392b; }
-    .btn-info { background: var(--accent); color: #fff; }
+    .btn-info { background: var(--accent-blue); color: #fff; }
     .btn-info:hover { background: #2196F3; }
     .btn-secondary { background: var(--bg); color: var(--text); }
     .btn-sm { padding: 0.6rem 0.8rem; font-size: 0.8rem; }
@@ -701,9 +717,8 @@
 <body>
   <!-- LOGIN -->
   <div id="login">
-    <div class="login-logo">🤖</div>
-    <h1 class="login-title">TICO-bot</h1>
-    <p class="login-subtitle">Panel de Control Pro</p>
+    <img src="/Imagen/logo 3.png" alt="TICObot" class="login-logo">
+    <p class="login-subtitle">Ingresá tu PIN</p>
     <div class="pin-box">
       <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
       <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
@@ -718,7 +733,7 @@
   <div id="app" style="display:none;">
     <header>
       <div class="header-left">
-        <span class="header-title" id="storeName">🏪 Mi Tienda</span>
+        <img src="/Imagen/logo 3.png" alt="TICObot" style="height:28px;">
       </div>
       <div class="header-right">
         <div class="header-badge">
@@ -732,13 +747,26 @@
 
     <div class="tabs">
       <button class="tab active" data-tab="pending">
-        📥 Pendientes
+        <span class="tab-icon">📥</span>
+        INBOX
         <span class="tab-badge" id="pendingBadge" style="display:none;">0</span>
       </button>
-      <button class="tab" data-tab="chats">💬 Chats</button>
-      <button class="tab" data-tab="contacts">👥 Contactos</button>
-      <button class="tab" data-tab="metrics">📊</button>
-      <button class="tab" data-tab="settings">⚙️</button>
+      <button class="tab" data-tab="chats">
+        <span class="tab-icon">💬</span>
+        CHATS
+      </button>
+      <button class="tab" data-tab="contacts">
+        <span class="tab-icon">👥</span>
+        CLIENTES
+      </button>
+      <button class="tab" data-tab="metrics">
+        <span class="tab-icon">📊</span>
+        STATS
+      </button>
+      <button class="tab" data-tab="settings">
+        <span class="tab-icon">⚙️</span>
+        CONFIG
+      </button>
     </div>
 
     <!-- PENDIENTES -->
@@ -771,9 +799,14 @@
 
     <!-- CONTACTOS -->
     <div class="content" id="tab-contacts">
-      <div class="search-box">
-        <span>🔍</span>
-        <input type="text" placeholder="Buscar contacto..." id="searchContacts">
+      <div style="display:flex;gap:0.5rem;margin-bottom:1rem;">
+        <div class="search-box" style="flex:1;margin-bottom:0;">
+          <span>🔍</span>
+          <input type="text" placeholder="Buscar contacto..." id="searchContacts">
+        </div>
+        <button class="btn btn-primary" style="grid-column:auto;padding:0.8rem 1rem;" onclick="openAddContactModal()">
+          ➕
+        </button>
       </div>
       <div style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap;">
         <button class="btn btn-sm btn-secondary filter-btn active" data-filter="all">Todos</button>
@@ -784,7 +817,7 @@
       <div class="empty-state" id="emptyContacts" style="display:none;">
         <div class="empty-icon">👥</div>
         <div class="empty-title">Sin contactos</div>
-        <div class="empty-text">Los contactos aparecerán cuando te escriban</div>
+        <div class="empty-text">Tocá ➕ para agregar un contacto</div>
       </div>
     </div>
 
@@ -868,6 +901,11 @@
           <span style="color:var(--text-muted)">2.0 Pro</span>
         </div>
       </div>
+      <div class="settings-section">
+        <button class="btn btn-danger" style="width:100%;" onclick="logout()">
+          🚪 Cerrar Sesión
+        </button>
+      </div>
     </div>
   </div>
 
@@ -940,6 +978,52 @@
       <div class="modal-actions">
         <button class="btn btn-secondary" id="contactModalCancel">Cancelar</button>
         <button class="btn btn-primary" id="contactModalSave">Guardar ✓</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL AGREGAR CONTACTO -->
+  <div class="modal-overlay" id="addContactModal">
+    <div class="modal">
+      <div class="modal-handle"></div>
+      <div class="modal-title">➕ Nuevo Contacto</div>
+      
+      <div class="input-group">
+        <label>Número de WhatsApp</label>
+        <input type="tel" class="price-input" id="newContactPhone" placeholder="8888-8888" style="font-size:1.3rem;" inputmode="tel">
+        <small style="color:var(--text-muted);display:block;margin-top:0.3rem;">Solo los 8 dígitos (sin 506)</small>
+      </div>
+      
+      <div class="input-group">
+        <label>Nombre</label>
+        <input type="text" class="price-input" id="newContactName" placeholder="Nombre del cliente" style="font-size:1.2rem;">
+      </div>
+      
+      <div class="input-group">
+        <label>Notas (opcional)</label>
+        <textarea id="newContactNotes" placeholder="Notas sobre este cliente..." style="width:100%;padding:1rem;border:2px solid var(--bg);border-radius:16px;font-size:1rem;resize:vertical;min-height:60px;background:var(--card);color:var(--text);"></textarea>
+      </div>
+      
+      <div class="input-group">
+        <label>Tags (opcional, separados por coma)</label>
+        <input type="text" class="price-input" id="newContactTags" placeholder="mayorista, recomendado" style="font-size:1rem;">
+      </div>
+      
+      <div style="display:flex;gap:1rem;margin:1rem 0;">
+        <div style="flex:1;display:flex;align-items:center;justify-content:space-between;background:var(--bg);padding:0.8rem 1rem;border-radius:12px;">
+          <span>⭐ VIP</span>
+          <div class="toggle" id="newContactVip"></div>
+        </div>
+      </div>
+      
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick="closeAddContactModal()">Cancelar</button>
+        <button class="btn btn-primary" onclick="saveNewContact()">Guardar ✓</button>
+      </div>
+      
+      <div style="margin-top:1rem;padding:1rem;background:var(--bg);border-radius:12px;">
+        <div style="font-weight:600;margin-bottom:0.5rem;">💡 Tip</div>
+        <div style="font-size:0.9rem;color:var(--text-muted);">Después de agregar el contacto, podés enviarle un mensaje desde la sección de Chats.</div>
       </div>
     </div>
   </div>
@@ -1073,22 +1157,36 @@
       return Array.from(pins).map(p => p.value).join('');
     }
 
-    $('loginBtn').onclick = () => {
+    // Conectar al servidor con un PIN
+    function connectWithPin(pin) {
       socket = io();
       
       socket.on('connect', () => {
-        socket.emit('auth', getPin());
+        socket.emit('auth', pin);
       });
 
       socket.on('auth_success', data => {
+        // Guardar PIN en sesión para auto-reconectar
+        sessionStorage.setItem('ticobot_pin', pin);
+        
         $('login').classList.add('hidden');
         $('app').style.display = 'block';
         $('storeName').textContent = '🏪 ' + (data.storeName || 'Mi Tienda');
         $('statusDot').classList.add('online');
-        toast('✅ ¡Conectado!', 'success');
+        
+        // Solo mostrar toast si no es auto-login
+        if (!window.isAutoLogin) {
+          toast('✅ ¡Conectado!', 'success');
+        }
+        window.isAutoLogin = false;
       });
 
       socket.on('auth_error', msg => {
+        // Limpiar PIN guardado si falla
+        sessionStorage.removeItem('ticobot_pin');
+        
+        $('login').classList.remove('hidden');
+        $('app').style.display = 'none';
         $('loginError').textContent = msg;
         pins.forEach(p => p.value = '');
         pins[0].focus();
@@ -1096,6 +1194,7 @@
 
       socket.on('init_data', data => {
         pending = data.pending || [];
+        chats = {}; // Limpiar chats anteriores
         if (data.history) {
           data.history.forEach(m => {
             if (!chats[m.waId]) chats[m.waId] = [];
@@ -1153,7 +1252,6 @@
       socket.on('contact_updated', contact => {
         contacts[contact.waId] = contact;
         renderContacts();
-        toast('✅ Contacto actualizado', 'success');
       });
 
       socket.on('contacts_list', data => {
@@ -1161,15 +1259,43 @@
           data.contacts.forEach(c => {
             contacts[c.waId] = c;
           });
-          renderContacts();
         }
+        renderContacts();
       });
 
       socket.on('disconnect', () => {
         $('statusDot').classList.remove('online');
-        toast('🔴 Desconectado', 'error');
+        toast('🔴 Desconectado - Reconectando...', 'warning');
       });
+
+      socket.on('reconnect', () => {
+        $('statusDot').classList.add('online');
+        toast('✅ Reconectado', 'success');
+      });
+    }
+
+    // Click en botón login
+    $('loginBtn').onclick = () => {
+      connectWithPin(getPin());
     };
+
+    // Cerrar sesión
+    function logout() {
+      if (confirm('¿Cerrar sesión?')) {
+        sessionStorage.removeItem('ticobot_pin');
+        if (socket) socket.disconnect();
+        location.reload();
+      }
+    }
+
+    // Auto-login si hay PIN guardado
+    const savedPin = sessionStorage.getItem('ticobot_pin');
+    if (savedPin) {
+      window.isAutoLogin = true;
+      connectWithPin(savedPin);
+    } else {
+      pins[0].focus();
+    }
 
     // === TABS ===
     $$('.tab').forEach(tab => {
@@ -1567,6 +1693,79 @@
       closeContactModal();
       toast('✅ Contacto guardado', 'success');
     };
+
+    // === AGREGAR CONTACTO NUEVO ===
+    function openAddContactModal() {
+      $('newContactPhone').value = '';
+      $('newContactName').value = '';
+      $('newContactNotes').value = '';
+      $('newContactTags').value = '';
+      $('newContactVip').classList.remove('active');
+      $('addContactModal').classList.add('active');
+      setTimeout(() => $('newContactPhone').focus(), 300);
+    }
+
+    function closeAddContactModal() {
+      $('addContactModal').classList.remove('active');
+    }
+
+    $('addContactModal').onclick = e => { if (e.target === $('addContactModal')) closeAddContactModal(); };
+    $('newContactVip').onclick = () => $('newContactVip').classList.toggle('active');
+
+    function saveNewContact() {
+      let phone = $('newContactPhone').value.replace(/\D/g, '');
+      const name = $('newContactName').value.trim();
+      
+      if (!phone || phone.length < 8) {
+        toast('⚠️ Ingresá un número válido', 'warning');
+        return;
+      }
+      
+      if (!name) {
+        toast('⚠️ Ingresá un nombre', 'warning');
+        return;
+      }
+      
+      // Formatear número: agregar 506 si no lo tiene
+      if (phone.length === 8) {
+        phone = '506' + phone;
+      } else if (phone.startsWith('506') && phone.length === 11) {
+        // Ya está bien
+      } else if (phone.startsWith('+506')) {
+        phone = phone.replace('+', '');
+      } else {
+        toast('⚠️ Formato de número inválido', 'warning');
+        return;
+      }
+      
+      const tags = $('newContactTags').value.split(',').map(t => t.trim()).filter(t => t);
+      
+      // Enviar al servidor
+      socket.emit('create_contact', {
+        waId: phone,
+        name: name,
+        note: $('newContactNotes').value.trim(),
+        tags: tags,
+        vip: $('newContactVip').classList.contains('active'),
+        blocked: false
+      });
+      
+      // Guardar localmente
+      contacts[phone] = {
+        waId: phone,
+        name: name,
+        note: $('newContactNotes').value.trim(),
+        tags: tags,
+        vip: $('newContactVip').classList.contains('active'),
+        blocked: false,
+        created_at: new Date().toISOString(),
+        purchases: 0
+      };
+      
+      renderContacts();
+      closeAddContactModal();
+      toast('✅ Contacto "' + name + '" agregado', 'success');
+    }
 
     // === INIT ===
     loadSettings();
