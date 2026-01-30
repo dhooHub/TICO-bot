@@ -271,7 +271,6 @@ function setOwnerPage(ownerWaId, page) {
  PROFILES (VIP / BLOQUEO / TAGS / NOTAS)
  ============================
  */
-const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
 const profiles = new Map(); // waId -> { waId, tags:[], note:"", blocked:false, vip:false, created_at, updated_at }
 
 function getProfile(waId) {
