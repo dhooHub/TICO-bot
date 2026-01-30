@@ -58,21 +58,22 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
+      padding-top: 15vh;
       z-index: 1000;
     }
     #login.hidden { display: none; }
     .login-logo { 
       width: 280px; 
       height: auto; 
-      margin-bottom: 2.5rem;
+      margin-bottom: 3rem;
       animation: fadeIn 0.5s ease-out;
     }
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-20px); }
       to { opacity: 1; transform: translateY(0); }
     }
-    .login-subtitle { color: rgba(255,255,255,0.6); font-size: 1.1rem; margin-bottom: 2rem; text-align: center; }
+    .login-subtitle { color: rgba(255,255,255,0.6); font-size: 1.1rem; margin-bottom: 1.5rem; text-align: center; }
     .pin-box { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; justify-content: center; }
     .pin-digit {
       width: 60px; height: 70px;
@@ -733,7 +734,7 @@
   <div id="app" style="display:none;">
     <header>
       <div class="header-left">
-        <img src="/Imagen/logo 3.png" alt="TICObot" style="height:36px;">
+        <img src="/Imagen/logo 3.png" alt="TICObot" style="height:45px;">
       </div>
       <div class="header-right">
         <div class="header-badge">
