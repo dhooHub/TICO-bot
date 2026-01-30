@@ -59,14 +59,14 @@
       flex-direction: column;
       align-items: center;
       justify-content: flex-start;
-      padding-top: 8vh;
+      padding-top: 12vh;
       z-index: 1000;
     }
     #login.hidden { display: none; }
     .login-logo { 
-      width: 280px; 
+      width: 320px; 
       height: auto; 
-      margin-bottom: 3rem;
+      margin-bottom: 2rem;
       animation: fadeIn 0.5s ease-out;
     }
     @keyframes fadeIn {
@@ -735,7 +735,7 @@
   <div id="app" style="display:none;">
     <header>
       <div class="header-left">
-        <img src="/Imagen/logo 3.png" alt="TICObot" style="height:60px;">
+        <img src="/Imagen/logo 3.png" alt="TICObot" style="height:50px;">
       </div>
       <div class="header-right">
         <div class="header-badge">
@@ -1285,17 +1285,57 @@
     function logout() {
       if (confirm('¿Cerrar sesión?')) {
         sessionStorage.removeItem('ticobot_pin');
+        sessionStorage.removeItem('ticobot_lastActivity');
         if (socket) socket.disconnect();
         location.reload();
       }
     }
 
-    // Auto-login si hay PIN guardado
+    // === TIMER DE INACTIVIDAD (10 minutos) ===
+    const INACTIVITY_TIMEOUT = 10 * 60 * 1000; // 10 minutos en milisegundos
+    let inactivityTimer;
+
+    function resetInactivityTimer() {
+      sessionStorage.setItem('ticobot_lastActivity', Date.now().toString());
+      clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(logoutByInactivity, INACTIVITY_TIMEOUT);
+    }
+
+    function logoutByInactivity() {
+      sessionStorage.removeItem('ticobot_pin');
+      sessionStorage.removeItem('ticobot_lastActivity');
+      if (socket) socket.disconnect();
+      toast('🔒 Sesión cerrada por inactividad', 'warning');
+      setTimeout(() => location.reload(), 1500);
+    }
+
+    function checkLastActivity() {
+      const lastActivity = sessionStorage.getItem('ticobot_lastActivity');
+      if (lastActivity) {
+        const elapsed = Date.now() - parseInt(lastActivity);
+        if (elapsed > INACTIVITY_TIMEOUT) {
+          // Expiró mientras estaba cerrado
+          sessionStorage.removeItem('ticobot_pin');
+          sessionStorage.removeItem('ticobot_lastActivity');
+          return false;
+        }
+      }
+      return true;
+    }
+
+    // Detectar actividad del usuario
+    ['click', 'touchstart', 'keypress', 'scroll'].forEach(event => {
+      document.addEventListener(event, resetInactivityTimer, { passive: true });
+    });
+
+    // Auto-login si hay PIN guardado Y no expiró
     const savedPin = sessionStorage.getItem('ticobot_pin');
-    if (savedPin) {
+    if (savedPin && checkLastActivity()) {
       window.isAutoLogin = true;
       connectWithPin(savedPin);
+      resetInactivityTimer();
     } else {
+      sessionStorage.removeItem('ticobot_pin');
       pins[0].focus();
     }
 
