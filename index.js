@@ -824,37 +824,44 @@ async function waPost(payload, label = "WA") {
       body: JSON.stringify(payload),
     });
 
-    const txt = await r.text();
-    if (!r.ok) console.log(`❌ ${label} ERROR`, r.status, txt);
-    else console.log(`✅ ${label} OK`, r.status, txt.slice(0, 200));
+   try {
+  const txt = await r.text();
 
-    // ✅ ALERTA AL DUEÑO EN ERRORES CRÍTICOS
-    if (!r.ok && OWNER_PHONE) {
-      const s = String(r.status);
-      if (s.startsWith("4") || s.startsWith("5")) {
-        // evita spamear: solo 401/403/429/500+ (ajustable)
-        if ([401, 403, 429].includes(r.status) || r.status >= 500) {
-          try {
-            await sendWhatsApp(
-              normalizeCRPhone(OWNER_PHONE),
-              `⚠️ WhatsApp API falló (${label})\nStatus: ${r.status}\n${txt.slice(0, 160)}`
-            );
-          } catch {}
-        }
-    
-    return { ok: r.ok, status: r.status, text: txt };
-  } catch (e) {
-    console.log(`⚠️ ${label} EXCEPTION:`, e?.message);
-    if (OWNER_PHONE) {
-      try {
-        await sendWhatsApp(
-          normalizeCRPhone(OWNER_PHONE),
-          `⚠️ WhatsApp API excepción (${label}): ${String(e?.message || "error").slice(0, 160)}`
-        );
-      } catch {}
+  if (!r.ok) console.log(`❌ ${label} ERROR`, r.status, txt);
+  else console.log(`✅ ${label} OK`, r.status, txt.slice(0, 200));
+
+  // ALERTA AL DUEÑO EN ERRORES CRÍTICOS
+  if (!r.ok && OWNER_PHONE) {
+    const s = String(r.status);
+    if (s.startsWith("4") || s.startsWith("5")) {
+      // evita spamear: solo 401/403/429/500+ (ajustable)
+      if ([401, 403, 429].includes(r.status) || r.status >= 500) {
+        try {
+          await sendWhatsApp(
+            normalizeCRPhone(OWNER_PHONE),
+            `⚠️ WhatsApp API falló (${label})\nStatus: ${r.status}\n${txt.slice(0, 160)}`
+          );
+        } catch {}
+      }
     }
-    return { ok: false, status: 0, text: String(e?.message || "error") };
   }
+
+  return { ok: r.ok, status: r.status, text: txt };
+} catch (e) {
+  console.log(`⚠️ ${label} EXCEPTION:`, e?.message);
+
+  if (OWNER_PHONE) {
+    try {
+      await sendWhatsApp(
+        normalizeCRPhone(OWNER_PHONE),
+        `⚠️ WhatsApp API excepción (${label}): ${String(e?.message || "error").slice(0, 160)}`
+      );
+    } catch {}
+  }
+
+  return { ok: false, status: 0, text: "" };
+}
+
 
 async function sendWhatsApp(toWaId, bodyText) {
   return waPost(
