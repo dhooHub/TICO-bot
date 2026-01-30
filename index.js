@@ -318,7 +318,6 @@ function loadProfilesFromDisk() {
   } catch (e) {
     console.log("⚠️ Error cargando profiles:", e?.message);
   }
-}
 
 setInterval(() => {
   if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
