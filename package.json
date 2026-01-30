@@ -1,23 +1,18 @@
 {
   "name": "tico-bot",
-  "version": "1.0.0",
-  "description": "Bot de WhatsApp para ventas en Costa Rica",
+  "version": "2.0.0",
+  "description": "TICO-bot con Panel Web",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node index.js"
+    "start": "node index.js"
   },
-  "keywords": ["whatsapp", "bot", "ventas", "costa-rica"],
-  "author": "Hernan",
-  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^3.3.2"
+    "socket.io": "^4.7.2"
   },
   "engines": {
     "node": ">=18.0.0"
   }
 }
-
 
 
