@@ -1427,27 +1427,28 @@ function shouldUseAI(session, text, hasImage) {
 async function aiHandleMessage(text, session) {
   const recentContext = getRecentMessages(session);
 
-  const systemPrompt = `Sos un asistente de ventas por WhatsApp de ${STORE_NAME} en Costa Rica.
-Objetivo: responder corto, claro y humano.
+  const systemPrompt = `Sos el asistente de ventas de ${STORE_NAME} en Costa Rica.
+TU ÚNICO OBJETIVO: Responder preguntas generales (horarios, envíos, garantía) de forma corta y amigable.
 
-REGLAS:
-1) NO inventés datos. Si no sabés o no tenés info, decí: "Dame un toque y lo reviso 🙌"
-2) Si preguntan por precio o stock de un producto específico, pedí foto y detalle (talla/color).
-3) Máximo 2 líneas. Usá solo 1 emoji al final.
-4) Español tico natural (pura vida, con gusto, dame un toque).
-5) Nunca des información interna ni técnica.
+REGLAS ESTRICTAS:
+1) NUNCA inventés datos. Si no sabés algo, decí: "Dejame confirmarlo, un toque 🙌"
+2) NUNCA des precios ni confirmes stock. Si preguntan precio o disponibilidad, SIEMPRE respondé: "Pasame una foto del producto y te confirmo de una vez 📸"
+3) Hablá de "vos", tono tico cercano (pura vida, con gusto, tuanis). NO usés "mae" ni "compa".
+4) MÁXIMO 2 líneas. 1 emoji al final.
+5) NO repitás información que el cliente ya sabe.
 
-INFO REAL:
-- Horario: ${HOURS_DAY}
-${offersShipping() ? `- Envíos: GAM ${SHIPPING_GAM}, Rural ${SHIPPING_RURAL}` : "- Envíos: NO"}
-${hasPhysicalLocation() ? `- Dirección: ${STORE_ADDRESS}` : ""}
-- Garantía: ${WARRANTY_DAYS}
+DATOS REALES DE LA TIENDA:
+• Horario: ${HOURS_DAY}
+• Pago: SINPE Móvil
+${offersShipping() ? `• Envíos: GAM ${SHIPPING_GAM} / Rural ${SHIPPING_RURAL} (${DELIVERY_DAYS})` : "• NO hacemos envíos, solo retiro en tienda"}
+${hasPhysicalLocation() ? `• Ubicación: ${STORE_ADDRESS}` : ""}
+• Garantía: ${WARRANTY_DAYS}
 
-CONTEXTO RECIENTE:
-${recentContext || "Inicio de conversación"}
+HISTORIAL RECIENTE:
+${recentContext || "(Primera interacción)"}
 
-Respondé SOLO con JSON válido:
-{"reply":"mensaje corto 🙂"}`;
+IMPORTANTE: Respondé SOLO con JSON válido, nada más.
+Formato: {"reply":"tu respuesta corta aquí 🙌"}`;
 
   try {
     const response = await fetchFn("https://api.openai.com/v1/chat/completions", {
@@ -1471,15 +1472,17 @@ Respondé SOLO con JSON válido:
     if (!response.ok) return null;
 
     const data = await response.json();
-    const raw = String(data?.choices?.[0]?.message?.content || "").trim();
+    const rawContent = data?.choices?.[0]?.message?.content;
 
-    const cleaned = raw
-      .replace(/```json/gi, "```")
-      .replace(/```/g, "")
-      .trim();
-
+    // Try/Catch específico para JSON parsing
     try {
-      const parsed = JSON.parse(cleaned);
+      const cleanedJson = String(rawContent || "")
+        .replace(/```json/gi, "")
+        .replace(/```/g, "")
+        .replace(/^[^{]*/, "")  // Eliminar texto antes del {
+        .trim();
+
+      const parsed = JSON.parse(cleanedJson);
 
       if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
         account.metrics.ai_calls += 1;
@@ -1488,9 +1491,18 @@ Respondé SOLO con JSON válido:
       }
 
       return null;
-    } catch (e) {
-      console.log("⚠️ Error parseando JSON IA:", cleaned.slice(0, 200));
-      return null;
+    } catch (jsonErr) {
+      console.log("⚠️ Error parseando JSON IA:", String(rawContent || "").slice(0, 200));
+      
+      // Fallback: si devolvió texto plano corto sin JSON, usarlo directo
+      const plainText = String(rawContent || "").trim();
+      if (plainText.length > 5 && plainText.length < 200 && !plainText.includes("{")) {
+        account.metrics.ai_calls += 1;
+        if (STATS_PERSIST) saveStatsToDisk();
+        return { reply: plainText };
+      }
+      
+      return null; // Si falla el parseo, el bot sigue sin crashear
     }
   } catch (e) {
     console.log("⚠️ Error IA:", e?.message);
