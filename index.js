@@ -1599,6 +1599,56 @@ app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
+// API para obtener imágenes de WhatsApp
+app.get("/api/image/:imageId", async (req, res) => {
+  const { imageId } = req.params;
+  
+  if (!WHATSAPP_TOKEN || !imageId) {
+    return res.status(400).send("No image");
+  }
+  
+  try {
+    // Primero obtener la URL de la imagen
+    const mediaUrl = `https://graph.facebook.com/${GRAPH_API_VERSION}/${imageId}`;
+    const mediaRes = await fetchFn(mediaUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    
+    if (!mediaRes.ok) {
+      return res.status(404).send("Image not found");
+    }
+    
+    const mediaData = await mediaRes.json();
+    const imageUrl = mediaData.url;
+    
+    if (!imageUrl) {
+      return res.status(404).send("No URL");
+    }
+    
+    // Descargar la imagen
+    const imageRes = await fetchFn(imageUrl, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` }
+    });
+    
+    if (!imageRes.ok) {
+      return res.status(404).send("Download failed");
+    }
+    
+    // Obtener el content-type
+    const contentType = imageRes.headers.get("content-type") || "image/jpeg";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    
+    // Stream la imagen
+    const buffer = await imageRes.arrayBuffer();
+    res.send(Buffer.from(buffer));
+    
+  } catch (e) {
+    console.log("⚠️ Error obteniendo imagen:", e?.message);
+    res.status(500).send("Error");
+  }
+});
+
 app.get("/status", (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY)
     return res.status(401).send("Unauthorized");
