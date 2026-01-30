@@ -293,29 +293,43 @@ function touchProfile(p) {
   p.updated_at = new Date().toISOString();
 }
 
+// ============================
+// PROFILES – PERSISTENCIA
+// ============================
+
+const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
+
 function saveProfilesToDisk() {
   if (!PROFILES_PERSIST) return;
+
   try {
     const arr = Array.from(profiles.values());
     safeWriteJson(PROFILES_FILE, arr);
   } catch (e) {
     console.log("⚠️ Error guardando profiles:", e?.message);
   }
+}
 
 function loadProfilesFromDisk() {
   if (!PROFILES_PERSIST) return;
+
   try {
     if (!fs.existsSync(PROFILES_FILE)) return;
+
     const arr = JSON.parse(fs.readFileSync(PROFILES_FILE, "utf-8"));
     if (Array.isArray(arr)) {
       for (const p of arr) {
-        if (p?.waId) profiles.set(String(p.waId), p);
+        if (p?.waId) {
+          profiles.set(String(p.waId), p);
+        }
       }
-      console.log(`👤 Profiles cargados: ${profiles.size}`);
     }
+
+    console.log(`👤 Profiles cargados: ${profiles.size}`);
   } catch (e) {
     console.log("⚠️ Error cargando profiles:", e?.message);
   }
+}
 
 setInterval(() => {
   if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
