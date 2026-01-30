@@ -1562,6 +1562,47 @@ io.on("connection", (socket) => {
     socket.emit("contact_updated", profile);
     console.log(`👤 Contacto actualizado: ${waId} - ${name || "(sin nombre)"}`);
   });
+
+  // Crear contacto nuevo
+  socket.on("create_contact", (data) => {
+    const { waId, name, note, tags, vip, blocked } = data;
+    if (!waId) return;
+
+    const normalized = normalizeCRPhone(waId);
+    
+    // Verificar si ya existe
+    if (profiles.has(normalized)) {
+      socket.emit("contact_error", { message: "Este contacto ya existe" });
+      return;
+    }
+
+    // Crear el perfil
+    const profile = getProfile(normalized);
+    profile.name = name || "";
+    profile.note = note || "";
+    profile.tags = tags || [];
+    profile.vip = vip || false;
+    profile.blocked = blocked || false;
+    profile.created_at = new Date().toISOString();
+    profile.updated_at = new Date().toISOString();
+    profile.purchases = 0;
+    profile.manual = true; // Marca que fue creado manualmente
+
+    // Actualizar sets de VIP
+    if (vip) {
+      vipSet.add(normalized);
+    }
+
+    if (PROFILES_PERSIST) saveProfilesToDisk();
+
+    // Confirmar al panel
+    socket.emit("contact_created", profile);
+    
+    // Notificar a todos los paneles conectados
+    io.emit("contact_updated", profile);
+    
+    console.log(`👤 Contacto CREADO: ${normalized} - ${name}`);
+  });
   
   socket.on("disconnect", () => {
     console.log("🔌 Panel desconectado:", socket.id);
