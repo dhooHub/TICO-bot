@@ -1,24 +1,27 @@
 /** ============================
  * TICO-bot (WhatsApp Cloud API)
- * index.js — versión completa FINAL (CORREGIDA)
+ * index.js — versión COMPLETA con PANEL WEB
  *
- * FIXES APLICADOS:
- * ✅ Webhook: responde 200 rápido + procesa async + itera entry/changes
- * ✅ Elimina duplicados: resetCloseTimer (solo 1) + comprobante SINPE (solo 1 ruta)
- * ✅ Garbage Collector (limpieza Maps / sesiones viejas)
- * ✅ PROFILES reales (load al iniciar + VIP/BLOCK por profile opcional)
- * ✅ REQUIRE_OWNER_CONFIRM (toggle)
- * ✅ Métricas vip_routed / blocked_hits
- * ✅ Manejo de errores WA: alerta al dueño (401/403/400 opcional)
- * ✅ SINTAXIS CORREGIDA - todas las llaves cerradas
+ * FEATURES:
+ * ✅ Bot WhatsApp completo
+ * ✅ Panel Web en tiempo real (Socket.io)
+ * ✅ El dueño controla desde su celular
+ * ✅ PWA instalable
  * ============================ */
 
 const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+// Servir archivos estáticos (el panel)
+app.use(express.static(path.join(__dirname, "public")));
 
 /**
  ============================
@@ -41,6 +44,9 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN || "";
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 const OWNER_PHONE = process.env.OWNER_PHONE || "";
 const APP_SECRET = process.env.APP_SECRET || "";
+
+// PIN para el panel (4-6 dígitos)
+const PANEL_PIN = process.env.PANEL_PIN || "1234";
 
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v24.0";
 
@@ -73,23 +79,15 @@ const PACK_PRICE_CRC = Number(process.env.PACK_PRICE_CRC || 1000);
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1";
-const SESSIONS_PERSIST = String(process.env.SESSIONS_PERSIST || "") === "1";
-
+const STATS_PERSIST = String(process.env.STATS_PERSIST || "1") === "1";
+const SESSIONS_PERSIST = String(process.env.SESSIONS_PERSIST || "1") === "1";
 const PROFILES_PERSIST = String(process.env.PROFILES_PERSIST || "1") === "1";
-const REQUIRE_OWNER_CONFIRM =
-  String(process.env.REQUIRE_OWNER_CONFIRM || "1") === "1";
 
 const SESSION_TIMEOUT_HOURS = Number(process.env.SESSION_TIMEOUT_HOURS || 2);
 const PHOTO_WAIT_SECONDS = Number(process.env.PHOTO_WAIT_SECONDS || 5);
 
-const SINPE_SMS_SECRET = process.env.SINPE_SMS_SECRET || "";
-const SINPE_WAIT_MINUTES = Number(process.env.SINPE_WAIT_MINUTES || 3);
-
 const PRO_REMINDER = String(process.env.PRO_REMINDER || "1") === "1";
-const ABANDONED_REMINDER_HOURS = Number(
-  process.env.ABANDONED_REMINDER_HOURS || 2
-);
+const ABANDONED_REMINDER_HOURS = Number(process.env.ABANDONED_REMINDER_HOURS || 2);
 const ABANDONED_REMINDER_MS = ABANDONED_REMINDER_HOURS * 60 * 60 * 1000;
 
 /**
@@ -140,17 +138,13 @@ function verifyMetaSignature(req) {
  ============================
  */
 function hasPhysicalLocation() {
-  return (
-    STORE_TYPE === "fisica_con_envios" || STORE_TYPE === "fisica_solo_recoger"
-  );
+  return STORE_TYPE === "fisica_con_envios" || STORE_TYPE === "fisica_solo_recoger";
 }
 function offersShipping() {
   return STORE_TYPE === "virtual" || STORE_TYPE === "fisica_con_envios";
 }
 function offersPickup() {
-  return (
-    STORE_TYPE === "fisica_con_envios" || STORE_TYPE === "fisica_solo_recoger"
-  );
+  return STORE_TYPE === "fisica_con_envios" || STORE_TYPE === "fisica_solo_recoger";
 }
 
 function getCatalogLinks(maxLinks = 5) {
@@ -164,9 +158,7 @@ function getCatalogLinks(maxLinks = 5) {
   const toShow = urls.slice(0, maxLinks);
 
   if (toShow.length === 1) return `Mirá nuestro catálogo: ${toShow[0]}`;
-  return `Mirá nuestros catálogos:\n${toShow
-    .map((u, i) => `${i + 1}. ${u}`)
-    .join("\n")}`;
+  return `Mirá nuestros catálogos:\n${toShow.map((u, i) => `${i + 1}. ${u}`).join("\n")}`;
 }
 
 function countLinks(text = "") {
@@ -228,6 +220,10 @@ const photoBuffers = new Map();
 const sinpeWaitTimers = new Map();
 const pendingQuotes = new Map();
 
+// Historial de chats para el panel
+let chatHistory = [];
+const MAX_CHAT_HISTORY = 100;
+
 /**
  ============================
  ANTI-DUPLICADO (Meta retries)
@@ -253,21 +249,7 @@ setInterval(() => {
 
 /**
  ============================
- PAGINACIÓN INBOX (dueño)
- ============================
- */
-const ownerInboxPage = new Map();
-const INBOX_PAGE_SIZE = 10;
-function getOwnerPage(ownerWaId) {
-  return Number(ownerInboxPage.get(ownerWaId) || 0);
-}
-function setOwnerPage(ownerWaId, page) {
-  ownerInboxPage.set(ownerWaId, Math.max(0, Number(page) || 0));
-}
-
-/**
- ============================
- PROFILES (VIP / BLOQUEO / TAGS / NOTAS)
+ PROFILES (VIP / BLOQUEO)
  ============================
  */
 const profiles = new Map();
@@ -286,9 +268,6 @@ function getProfile(waId) {
     });
   }
   return profiles.get(id);
-}
-function touchProfile(p) {
-  p.updated_at = new Date().toISOString();
 }
 
 const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
@@ -310,9 +289,7 @@ function loadProfilesFromDisk() {
     const arr = JSON.parse(fs.readFileSync(PROFILES_FILE, "utf-8"));
     if (Array.isArray(arr)) {
       for (const p of arr) {
-        if (p?.waId) {
-          profiles.set(String(p.waId), p);
-        }
+        if (p?.waId) profiles.set(String(p.waId), p);
       }
     }
     console.log(`👤 Profiles cargados: ${profiles.size}`);
@@ -325,20 +302,10 @@ setInterval(() => {
   if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
 }, 5 * 60 * 1000);
 
-/**
- ============================
- VIP/BLOCK por ENV (fallback)
- ============================
- */
 const VIP_NUMBERS = (process.env.VIP_NUMBERS || "")
-  .split(",")
-  .map((x) => normalizeCRPhone(x))
-  .filter(Boolean);
-
+  .split(",").map((x) => normalizeCRPhone(x)).filter(Boolean);
 const BLOCKED_NUMBERS = (process.env.BLOCKED_NUMBERS || "")
-  .split(",")
-  .map((x) => normalizeCRPhone(x))
-  .filter(Boolean);
+  .split(",").map((x) => normalizeCRPhone(x)).filter(Boolean);
 
 const vipSet = new Set(VIP_NUMBERS);
 const blockedSet = new Set(BLOCKED_NUMBERS);
@@ -506,14 +473,20 @@ function msgOutOfTokens() {
  ============================
  */
 function addPendingQuote(session) {
-  pendingQuotes.set(session.waId, {
+  const quote = {
     waId: session.waId,
     details: session.last_details_text || "(sin detalle)",
+    imageId: session.last_image_id || null,
     created_at: new Date().toISOString(),
-  });
+  };
+  pendingQuotes.set(session.waId, quote);
+  
+  // Notificar al panel
+  io.emit("new_pending", quote);
 }
 function removePendingQuote(waId) {
   pendingQuotes.delete(waId);
+  io.emit("pending_resolved", { waId });
 }
 
 /**
@@ -582,7 +555,7 @@ function resetCase(session) {
 
 /**
  ============================
- HISTORIAL MENSAJES (IA)
+ HISTORIAL MENSAJES (IA + Panel)
  ============================
  */
 function addToMessageHistory(session, role, content) {
@@ -597,6 +570,28 @@ function getRecentMessages(session) {
     .slice(-5)
     .map((m) => `${m.role}: ${m.content}`)
     .join("\n");
+}
+
+// Agregar al historial global del panel
+function addToChatHistory(waId, direction, text, imageId = null) {
+  const entry = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    waId,
+    direction, // 'in' o 'out'
+    text,
+    imageId,
+    timestamp: new Date().toISOString(),
+  };
+  
+  chatHistory.push(entry);
+  if (chatHistory.length > MAX_CHAT_HISTORY) {
+    chatHistory = chatHistory.slice(-MAX_CHAT_HISTORY);
+  }
+  
+  // Emitir al panel en tiempo real
+  io.emit("new_message", entry);
+  
+  return entry;
 }
 
 /**
@@ -631,36 +626,6 @@ function handlePhotoBuffer(waId, imageId, caption, callback) {
     photoBuffers.delete(waId);
     callback(photos);
   }, PHOTO_WAIT_SECONDS * 1000);
-}
-
-/**
- ============================
- TIMEOUT VERIFICACIÓN SINPE
- ============================
- */
-function startSinpeWaitTimer(waId, session) {
-  if (sinpeWaitTimers.has(waId))
-    clearTimeout(sinpeWaitTimers.get(waId));
-
-  const timer = setTimeout(async () => {
-    sinpeWaitTimers.delete(waId);
-    if (
-      session.state === "ESPERANDO_SINPE" &&
-      session.pending_sinpe?.status === "pending"
-    ) {
-      await notifyOwner(
-        `⚠️ No se detectó SINPE automático\n📱 ${waId}\n🔑 Ref: ${session.sinpe_reference}\n💵 ₡${session.pending_sinpe?.expectedAmount?.toLocaleString() || "?"}\n\nComprobar manual: ${waId} pagado`
-      );
-    }
-  }, SINPE_WAIT_MINUTES * 60 * 1000);
-
-  sinpeWaitTimers.set(waId, timer);
-}
-function cancelSinpeWaitTimer(waId) {
-  if (sinpeWaitTimers.has(waId)) {
-    clearTimeout(sinpeWaitTimers.get(waId));
-    sinpeWaitTimers.delete(waId);
-  }
 }
 
 /**
@@ -747,16 +712,7 @@ function isGreeting(text) {
 function isYes(text) {
   const t = String(text || "").trim().toLowerCase();
   return [
-    "si",
-    "sí",
-    "sii",
-    "claro",
-    "lo quiero",
-    "dale",
-    "va",
-    "listo",
-    "ok",
-    "de una",
+    "si", "sí", "sii", "claro", "lo quiero", "dale", "va", "listo", "ok", "de una",
   ].some((k) => t === k || t.startsWith(k));
 }
 function isNo(text) {
@@ -776,17 +732,12 @@ function detectDeliveryMethod(text) {
 
 /**
  ============================
- WHATSAPP API (texto, imagen, botones, lista)
+ WHATSAPP API
  ============================
  */
 async function waPost(payload, label = "WA") {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-    console.log(
-      `📤 [SIM-${label}]`,
-      payload?.to,
-      payload?.type || "",
-      JSON.stringify(payload).slice(0, 200)
-    );
+    console.log(`📤 [SIM-${label}]`, payload?.to, payload?.type || "", JSON.stringify(payload).slice(0, 200));
     return { ok: true, status: 200, text: "SIM" };
   }
 
@@ -807,38 +758,17 @@ async function waPost(payload, label = "WA") {
     if (!r.ok) console.log(`❌ ${label} ERROR`, r.status, txt);
     else console.log(`✅ ${label} OK`, r.status, txt.slice(0, 200));
 
-    if (!r.ok && OWNER_PHONE) {
-      const s = String(r.status);
-      if (s.startsWith("4") || s.startsWith("5")) {
-        if ([401, 403, 429].includes(r.status) || r.status >= 500) {
-          try {
-            await sendWhatsApp(
-              normalizeCRPhone(OWNER_PHONE),
-              `⚠️ WhatsApp API falló (${label})\nStatus: ${r.status}\n${txt.slice(0, 160)}`
-            );
-          } catch {}
-        }
-      }
-    }
-
     return { ok: r.ok, status: r.status, text: txt };
   } catch (e) {
     console.log(`⚠️ ${label} EXCEPTION:`, e?.message);
-
-    if (OWNER_PHONE) {
-      try {
-        await sendWhatsApp(
-          normalizeCRPhone(OWNER_PHONE),
-          `⚠️ WhatsApp API excepción (${label}): ${String(e?.message || "error").slice(0, 160)}`
-        );
-      } catch {}
-    }
-
     return { ok: false, status: 0, text: "" };
   }
 }
 
 async function sendWhatsApp(toWaId, bodyText) {
+  // Agregar al historial del panel
+  addToChatHistory(toWaId, "out", bodyText);
+  
   return waPost(
     {
       messaging_product: "whatsapp",
@@ -852,6 +782,9 @@ async function sendWhatsApp(toWaId, bodyText) {
 
 async function sendImage(toWaId, imageId, caption = "") {
   if (!imageId) return;
+  
+  addToChatHistory(toWaId, "out", caption || "(imagen)", imageId);
+  
   const r = await waPost(
     {
       messaging_product: "whatsapp",
@@ -865,6 +798,8 @@ async function sendImage(toWaId, imageId, caption = "") {
 }
 
 async function sendButtons(toWaId, bodyText, buttons) {
+  addToChatHistory(toWaId, "out", bodyText);
+  
   const r = await waPost(
     {
       messaging_product: "whatsapp",
@@ -924,333 +859,19 @@ async function sendList(toWaId, bodyText, buttonText, sectionTitle, rows) {
 
 /**
  ============================
- NOTIFY OWNER
+ NOTIFY OWNER (también por panel)
  ============================
  */
 async function notifyOwner(message, imageId = null) {
   console.log("📢 DUEÑO:", message);
+  
+  // Emitir al panel web
+  io.emit("owner_notification", { message, imageId, timestamp: new Date().toISOString() });
+  
   if (!OWNER_PHONE) return;
   const owner = normalizeCRPhone(OWNER_PHONE);
   if (imageId) return sendImage(owner, imageId, message);
   return sendWhatsApp(owner, message);
-}
-
-/**
- ============================
- INBOX LIST (dueño)
- ============================
- */
-function buildInboxPageRows(page) {
-  const all = Array.from(pendingQuotes.values()).sort((a, b) => {
-    const ta = Date.parse(a?.created_at || "") || 0;
-    const tb = Date.parse(b?.created_at || "") || 0;
-    return ta - tb;
-  });
-
-  const total = all.length;
-  const totalPages = Math.max(1, Math.ceil(total / INBOX_PAGE_SIZE));
-  const safePage = Math.min(Math.max(0, page), totalPages - 1);
-
-  const start = safePage * INBOX_PAGE_SIZE;
-  const slice = all.slice(start, start + INBOX_PAGE_SIZE);
-
-  const rows = slice.map((p) => ({
-    id: `PEND_${p.waId}`,
-    title: p.waId,
-    description: (p.details || "").slice(0, 70),
-  }));
-
-  if (safePage > 0)
-    rows.push({
-      id: `INBOX_PREV_${safePage - 1}`,
-      title: "⬅️ Anterior",
-      description: `Página ${safePage} de ${totalPages}`,
-    });
-  if (safePage < totalPages - 1)
-    rows.push({
-      id: `INBOX_NEXT_${safePage + 1}`,
-      title: "➡️ Siguiente",
-      description: `Página ${safePage + 2} de ${totalPages}`,
-    });
-
-  return { rows, safePage, totalPages, total };
-}
-
-async function showInboxList(ownerWaId, page = 0) {
-  if (pendingQuotes.size === 0) {
-    await sendWhatsApp(ownerWaId, "📥 No hay pendientes");
-    return;
-  }
-  const { rows, safePage, totalPages, total } = buildInboxPageRows(page);
-  setOwnerPage(ownerWaId, safePage);
-
-  await sendList(
-    ownerWaId,
-    `📥 Pendientes: ${total}\nPágina ${safePage + 1}/${totalPages}\n\nTocá un cliente para que te mande el número listo para copiar/pegar.`,
-    "Ver pendientes",
-    "Pendientes",
-    rows
-  );
-}
-
-/**
- ============================
- CONFIRMACIONES DUEÑO
- ============================
- */
-const ownerConfirm = new Map();
-
-function setOwnerConfirm(ownerWaId, data) {
-  ownerConfirm.set(ownerWaId, { ...data, created_at: Date.now() });
-}
-function getOwnerConfirm(ownerWaId) {
-  const c = ownerConfirm.get(ownerWaId);
-  if (!c) return null;
-  if (Date.now() - (c.created_at || 0) > 10 * 60 * 1000) {
-    ownerConfirm.delete(ownerWaId);
-    return null;
-  }
-  return c;
-}
-function clearOwnerConfirm(ownerWaId) {
-  ownerConfirm.delete(ownerWaId);
-}
-
-async function askOwnerConfirm(ownerWaId, previewText) {
-  await sendButtons(ownerWaId, `🧾 Confirmar envío:\n\n${previewText}`, [
-    { id: "OWNER_YES", title: "SI" },
-    { id: "OWNER_NO", title: "NO" },
-    { id: "OWNER_EDIT", title: "EDITAR" },
-  ]);
-}
-
-/**
- ============================
- PARSEO COMANDO DUEÑO
- ============================
- */
-function parseOwnerCommand(text) {
-  const t = String(text || "").trim();
-  const parts = t.split(/\s+/);
-  if (parts.length < 2) return null;
-
-  const clientNum = normalizeCRPhone(parts[0]);
-  if (clientNum.length < 8) return null;
-
-  const cmd = norm(parts[1]);
-
-  if (cmd === "pagado" || cmd === "pago" || cmd === "ok")
-    return { type: "PAGADO", clientWaId: clientNum };
-
-  if (cmd === "0" || cmd === "no" || cmd === "nohay" || cmd === "agotado")
-    return { type: "NO_HAY", clientWaId: clientNum };
-
-  if (cmd === "pausa" || cmd === "pausar" || cmd === "stop")
-    return { type: "PAUSA", clientWaId: clientNum };
-
-  if (cmd === "bot" || cmd === "reanudar" || cmd === "activar")
-    return { type: "REANUDAR", clientWaId: clientNum };
-
-  if (cmd === "cat" || cmd === "catalogo")
-    return { type: "CATALOGO", clientWaId: clientNum };
-
-  const priceStr = parts[1].replace(/[^\d-]/g, "");
-  if (priceStr.includes("-")) {
-    const [p, s] = priceStr.split("-");
-    const price = Number(p);
-    const shipping = Number(s);
-    if (price > 0)
-      return {
-        type: "PRECIO",
-        clientWaId: clientNum,
-        price,
-        shipping: shipping > 0 ? shipping : null,
-      };
-  } else {
-    const price = Number(priceStr);
-    if (price > 0)
-      return { type: "PRECIO", clientWaId: clientNum, price, shipping: null };
-  }
-
-  return null;
-}
-
-/**
- ============================
- HANDLER DUEÑO
- ============================
- */
-async function handleOwnerCommand(ownerWaId, text) {
-  const raw = String(text || "").trim();
-  const tnorm = norm(raw);
-
-  if (tnorm === "owner_yes" || tnorm === "owner_no" || tnorm === "owner_edit") {
-    const pending = getOwnerConfirm(ownerWaId);
-    if (!pending) {
-      await sendWhatsApp(ownerWaId, "ℹ️ No hay nada pendiente por confirmar.");
-      return true;
-    }
-
-    if (tnorm === "owner_no") {
-      clearOwnerConfirm(ownerWaId);
-      await sendWhatsApp(ownerWaId, "✅ Cancelado.");
-      return true;
-    }
-
-    if (tnorm === "owner_edit") {
-      await sendWhatsApp(ownerWaId, `Escribí:\nEDITAR <mensaje nuevo>`);
-      return true;
-    }
-
-    const ok = await executeOwnerAction(ownerWaId, pending, null);
-    if (ok) clearOwnerConfirm(ownerWaId);
-    return true;
-  }
-
-  if (tnorm.startsWith("editar ")) {
-    const pending = getOwnerConfirm(ownerWaId);
-    if (!pending) {
-      await sendWhatsApp(ownerWaId, "ℹ️ No hay nada pendiente por editar.");
-      return true;
-    }
-    const newText = raw.slice(7).trim();
-    if (!newText) {
-      await sendWhatsApp(ownerWaId, "⚠️ Pegá el mensaje nuevo después de EDITAR.");
-      return true;
-    }
-    const ok = await executeOwnerAction(ownerWaId, pending, newText);
-    if (ok) clearOwnerConfirm(ownerWaId);
-    return true;
-  }
-
-  if (tnorm === "pendientes" || tnorm === "inbox") {
-    await showInboxList(ownerWaId, 0);
-    return true;
-  }
-  if (tnorm.startsWith("inbox_next_")) {
-    const nextPage = Number(raw.replace(/^INBOX_NEXT_/i, "")) || 0;
-    await showInboxList(ownerWaId, nextPage);
-    return true;
-  }
-  if (tnorm.startsWith("inbox_prev_")) {
-    const prevPage = Number(raw.replace(/^INBOX_PREV_/i, "")) || 0;
-    await showInboxList(ownerWaId, prevPage);
-    return true;
-  }
-  if (tnorm === "inbox_back") {
-    await showInboxList(ownerWaId, getOwnerPage(ownerWaId));
-    return true;
-  }
-  if (tnorm.startsWith("resolve_")) {
-    const num = normalizeCRPhone(raw.replace(/^RESOLVE_/i, ""));
-    if (pendingQuotes.has(num)) {
-      removePendingQuote(num);
-      await sendWhatsApp(ownerWaId, `✅ Marcado como resuelto: ${num}`);
-    } else {
-      await sendWhatsApp(ownerWaId, `ℹ️ Ese pendiente ya no está: ${num}`);
-    }
-    await showInboxList(ownerWaId, getOwnerPage(ownerWaId));
-    return true;
-  }
-  if (tnorm.startsWith("pend_")) {
-    const num = normalizeCRPhone(raw.replace(/^PEND_/i, ""));
-    const p = pendingQuotes.get(num);
-    const details = p?.details ? `📝 ${p.details}\n\n` : "";
-
-    const msg = `✅ Copiá y pegá el número (y agregá precio):
-
-${details}📱 ${num}
-
-Ejemplos:
-${num} 7500
-${num} 7500-2500
-${num} 0
-${num} pagado
-${num} cat`;
-
-    await sendButtons(ownerWaId, msg, [
-      { id: `RESOLVE_${num}`, title: "✅ Resuelto" },
-      { id: "INBOX_BACK", title: "📥 Pendientes" },
-    ]);
-    return true;
-  }
-
-  const cmd = parseOwnerCommand(raw);
-  if (!cmd) {
-    const onlyPrice = raw.replace(/[^\d]/g, "");
-    if (onlyPrice.length >= 3 && onlyPrice.length <= 6) {
-      await sendWhatsApp(
-        ownerWaId,
-        `⚠️ Te faltó el número del cliente.\nEj: 506XXXXXXXX ${onlyPrice}`
-      );
-      return true;
-    }
-    return false;
-  }
-
-  const clientSession = getSession(cmd.clientWaId);
-
-  if (cmd.type === "PAUSA") {
-    clientSession.paused = true;
-    await sendWhatsApp(
-      ownerWaId,
-      `⏸️ Bot pausado para ${cmd.clientWaId}. Reanudar: ${cmd.clientWaId} bot`
-    );
-    return true;
-  }
-  if (cmd.type === "REANUDAR") {
-    clientSession.paused = false;
-    await sendWhatsApp(ownerWaId, `▶️ Bot reanudado para ${cmd.clientWaId}`);
-    return true;
-  }
-
-  if (!REQUIRE_OWNER_CONFIRM) {
-    await executeOwnerAction(ownerWaId, cmd, null);
-    return true;
-  }
-
-  if (cmd.type === "PRECIO") {
-    const { price, shipping } = cmd;
-    const total = price + (shipping || 0);
-    const preview =
-      `Cliente: ${cmd.clientWaId}\n` +
-      `Acción: Enviar precio\n` +
-      `Precio: ₡${price.toLocaleString()}` +
-      (shipping ? `\nEnvío: ₡${Number(shipping).toLocaleString()}` : "") +
-      `\nTotal: ₡${total.toLocaleString()}`;
-
-    setOwnerConfirm(ownerWaId, {
-      type: "PRECIO",
-      clientWaId: cmd.clientWaId,
-      price,
-      shipping: shipping || 0,
-    });
-    await askOwnerConfirm(ownerWaId, preview);
-    return true;
-  }
-
-  if (cmd.type === "NO_HAY") {
-    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar "No hay"`;
-    setOwnerConfirm(ownerWaId, { type: "NO_HAY", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(ownerWaId, preview);
-    return true;
-  }
-
-  if (cmd.type === "PAGADO") {
-    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Confirmar pago (pagado)`;
-    setOwnerConfirm(ownerWaId, { type: "PAGADO", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(ownerWaId, preview);
-    return true;
-  }
-
-  if (cmd.type === "CATALOGO") {
-    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar catálogo`;
-    setOwnerConfirm(ownerWaId, { type: "CATALOGO", clientWaId: cmd.clientWaId });
-    await askOwnerConfirm(ownerWaId, preview);
-    return true;
-  }
-
-  return false;
 }
 
 /**
@@ -1260,9 +881,7 @@ ${num} cat`;
  */
 function scheduleAbandonedReminder(session) {
   if (!PRO_REMINDER) return;
-
   if (session.reminder_timer) clearTimeout(session.reminder_timer);
-
   if (session.state !== "PRECIO_ENVIADO" || !session.last_offer) return;
 
   session.reminder_timer = setTimeout(async () => {
@@ -1298,33 +917,28 @@ function resetCloseTimer(session) {
 
 /**
  ============================
- EJECUTA ACCIÓN CONFIRMADA
+ EJECUTAR ACCIÓN DESDE PANEL
  ============================
  */
-async function executeOwnerAction(ownerWaId, action, overrideText = null) {
-  const clientWaId = action.clientWaId;
+async function executeAction(clientWaId, actionType, data = {}) {
   const clientSession = getSession(clientWaId);
-
-  if (["PRECIO", "NO_HAY", "PAGADO"].includes(action.type)) removePendingQuote(clientWaId);
-
-  if (action.type === "PRECIO") {
-    const price = Number(action.price || 0);
-    const shipping = Number(action.shipping || 0);
+  
+  if (actionType === "PRECIO") {
+    const price = Number(data.price || 0);
+    const shipping = Number(data.shipping || 0);
 
     clientSession.last_offer = { price, shipping };
     clientSession.last_offer_sent_at = Date.now();
     clientSession.state = "PRECIO_ENVIADO";
-
+    
+    removePendingQuote(clientWaId);
     account.metrics.quotes_sent += 1;
     if (STATS_PERSIST) saveStatsToDisk();
 
     const total = price + shipping;
-
-    const msg =
-      overrideText ||
-      `${fraseNoRepetir("si_hay", clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}` +
-        (shipping ? `\nEnvío: ₡${shipping.toLocaleString()}` : "") +
-        `\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`;
+    const msg = `${fraseNoRepetir("si_hay", clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}` +
+      (shipping ? `\nEnvío: ₡${shipping.toLocaleString()}` : "") +
+      `\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`;
 
     await sendButtons(clientWaId, msg, [
       { id: "BTN_YES", title: "Sí, lo quiero" },
@@ -1332,45 +946,29 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
       { id: "BTN_MORE", title: "Enviar otra foto" },
     ]);
 
-    await sendWhatsApp(ownerWaId, `✅ Listo: precio enviado a ${clientWaId}`);
     resetCloseTimer(clientSession);
-    return true;
+    return { success: true, message: `Precio enviado a ${clientWaId}` };
   }
 
-  if (action.type === "NO_HAY") {
+  if (actionType === "NO_HAY") {
+    removePendingQuote(clientWaId);
     account.metrics.no_stock += 1;
     if (STATS_PERSIST) saveStatsToDisk();
 
-    const msg = overrideText || fraseNoRepetir("no_hay", clientWaId);
-    await sendWhatsApp(clientWaId, msg);
-
-    await sendWhatsApp(ownerWaId, `✅ Listo: "No hay" enviado a ${clientWaId}`);
+    await sendWhatsApp(clientWaId, fraseNoRepetir("no_hay", clientWaId));
     resetCase(clientSession);
-    return true;
+    return { success: true, message: `"No hay" enviado a ${clientWaId}` };
   }
 
-  if (action.type === "CATALOGO") {
-    const catalogMsg = getCatalogLinks();
-    if (!catalogMsg) {
-      await sendWhatsApp(ownerWaId, `⚠️ No hay catálogo configurado`);
-      return true;
-    }
-    const msg = overrideText || `¡Hola! ${catalogMsg} 🙌`;
-    await sendWhatsApp(clientWaId, msg);
-    await sendWhatsApp(ownerWaId, `✅ Listo: catálogo enviado a ${clientWaId}`);
-    return true;
-  }
-
-  if (action.type === "PAGADO") {
+  if (actionType === "PAGADO") {
     if (clientSession.pending_sinpe) {
       clientSession.pending_sinpe.status = "confirmed";
       clientSession.pending_sinpe.confirmed_at = new Date().toISOString();
     }
     clientSession.state = "PAGO_CONFIRMADO";
+    removePendingQuote(clientWaId);
     account.metrics.sinpe_confirmed += 1;
     if (STATS_PERSIST) saveStatsToDisk();
-
-    cancelSinpeWaitTimer(clientWaId);
 
     const deliveryMsg =
       clientSession.delivery_method === "envio"
@@ -1379,16 +977,39 @@ async function executeOwnerAction(ownerWaId, action, overrideText = null) {
         ? `Podés recogerlo en: ${STORE_ADDRESS}\n${HOURS_DAY}`
         : "Te contactamos para coordinar";
 
-    const msg =
-      overrideText ||
-      `¡Pago confirmado! ${fraseNoRepetir("gracias", clientWaId)}\n\n${deliveryMsg}`;
-
-    await sendWhatsApp(clientWaId, msg);
-    await sendWhatsApp(ownerWaId, `✅ Listo: pago confirmado a ${clientWaId}`);
-    return true;
+    await sendWhatsApp(clientWaId, `¡Pago confirmado! ${fraseNoRepetir("gracias", clientWaId)}\n\n${deliveryMsg}`);
+    return { success: true, message: `Pago confirmado a ${clientWaId}` };
   }
 
-  return true;
+  if (actionType === "CATALOGO") {
+    const catalogMsg = getCatalogLinks();
+    if (!catalogMsg) {
+      return { success: false, message: "No hay catálogo configurado" };
+    }
+    await sendWhatsApp(clientWaId, `¡Hola! ${catalogMsg} 🙌`);
+    return { success: true, message: `Catálogo enviado a ${clientWaId}` };
+  }
+
+  if (actionType === "MENSAJE_LIBRE") {
+    const texto = String(data.texto || "").trim();
+    if (!texto) {
+      return { success: false, message: "Mensaje vacío" };
+    }
+    await sendWhatsApp(clientWaId, texto);
+    return { success: true, message: `Mensaje enviado a ${clientWaId}` };
+  }
+
+  if (actionType === "PAUSA") {
+    clientSession.paused = true;
+    return { success: true, message: `Bot pausado para ${clientWaId}` };
+  }
+
+  if (actionType === "REANUDAR") {
+    clientSession.paused = false;
+    return { success: true, message: `Bot reanudado para ${clientWaId}` };
+  }
+
+  return { success: false, message: "Acción no reconocida" };
 }
 
 /**
@@ -1405,14 +1026,9 @@ function shouldUseAI(session, text, hasImage) {
   if ((session.ai_used_count || 0) >= 3) return false;
 
   const critical = [
-    "PRECIO_ENVIADO",
-    "PREGUNTANDO_METODO",
-    "PIDIENDO_DATOS",
-    "PIDIENDO_DATOS_RECOGER",
-    "ESPERANDO_SINPE",
-    "PAGO_CONFIRMADO",
-    "CERRADO_TIMEOUT",
-    "ESPERANDO_CONFIRMACION_VENDEDOR",
+    "PRECIO_ENVIADO", "PREGUNTANDO_METODO", "PIDIENDO_DATOS",
+    "PIDIENDO_DATOS_RECOGER", "ESPERANDO_SINPE", "PAGO_CONFIRMADO",
+    "CERRADO_TIMEOUT", "ESPERANDO_CONFIRMACION_VENDEDOR",
   ];
   if (critical.includes(session.state)) return false;
 
@@ -1474,12 +1090,11 @@ Formato: {"reply":"tu respuesta corta aquí 🙌"}`;
     const data = await response.json();
     const rawContent = data?.choices?.[0]?.message?.content;
 
-    // Try/Catch específico para JSON parsing
     try {
       const cleanedJson = String(rawContent || "")
         .replace(/```json/gi, "")
         .replace(/```/g, "")
-        .replace(/^[^{]*/, "")  // Eliminar texto antes del {
+        .replace(/^[^{]*/, "")
         .trim();
 
       const parsed = JSON.parse(cleanedJson);
@@ -1494,7 +1109,6 @@ Formato: {"reply":"tu respuesta corta aquí 🙌"}`;
     } catch (jsonErr) {
       console.log("⚠️ Error parseando JSON IA:", String(rawContent || "").slice(0, 200));
       
-      // Fallback: si devolvió texto plano corto sin JSON, usarlo directo
       const plainText = String(rawContent || "").trim();
       if (plainText.length > 5 && plainText.length < 200 && !plainText.includes("{")) {
         account.metrics.ai_calls += 1;
@@ -1502,7 +1116,7 @@ Formato: {"reply":"tu respuesta corta aquí 🙌"}`;
         return { reply: plainText };
       }
       
-      return null; // Si falla el parseo, el bot sigue sin crashear
+      return null;
     }
   } catch (e) {
     console.log("⚠️ Error IA:", e?.message);
@@ -1526,6 +1140,10 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
   account.metrics.chats_total += 1;
   if (STATS_PERSIST) saveStatsToDisk();
 
+  // Agregar mensaje entrante al historial del panel
+  addToChatHistory(waId, "in", text || "(imagen)", hasImage ? imageId : null);
+
+  // Normaliza IDs de botones
   if (text === "BTN_YES") text = "si";
   if (text === "BTN_NO") text = "no";
   if (text === "BTN_MORE") text = "otra foto";
@@ -1562,8 +1180,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
 
   if (!isDaytime() && !hasImage) {
     const lower = norm(text);
-    const isInfo =
-      /\b(precio|cuanto|cuesta|vale|hay|tienen|disponible|stock)\b/.test(lower);
+    const isInfo = /\b(precio|cuanto|cuesta|vale|hay|tienen|disponible|stock)\b/.test(lower);
     if (isInfo) {
       account.metrics.night_leads += 1;
       if (STATS_PERSIST) saveStatsToDisk();
@@ -1575,30 +1192,27 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     }
   }
 
+  // Comprobante SINPE
   if (hasImage && session.state === "ESPERANDO_SINPE" && imageId) {
     account.metrics.receipts_forwarded += 1;
     if (STATS_PERSIST) saveStatsToDisk();
 
-    await sendWhatsApp(
-      waId,
-      "¡Listo! 🙌 Recibí el comprobante. Ya se lo paso al encargado para revisión."
-    );
+    await sendWhatsApp(waId, "¡Listo! 🙌 Recibí el comprobante. Ya se lo paso al encargado para revisión.");
     await notifyOwner(
-      `🧾 COMPROBANTE SINPE\n📱 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference || "(sin ref)"}\n💵 Esperado: ₡${(session.pending_sinpe?.expectedAmount || 0).toLocaleString()}\n\nSi está OK, respondé:\n${waId} pagado`,
+      `🧾 COMPROBANTE SINPE\n📱 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference || "(sin ref)"}\n💵 Esperado: ₡${(session.pending_sinpe?.expectedAmount || 0).toLocaleString()}`,
       imageId
     );
     return;
   }
 
+  // Foto de producto
   if (hasImage) {
     handlePhotoBuffer(waId, imageId, text, async (photos) => {
       const details = String(text || "").trim() || "(sin detalles)";
       session.last_image_id = photos[0]?.imageId || null;
       session.last_details_text = details;
 
-      session.details_log = Array.isArray(session.details_log)
-        ? session.details_log
-        : [];
+      session.details_log = Array.isArray(session.details_log) ? session.details_log : [];
       session.details_log.push({
         at: new Date().toISOString(),
         details,
@@ -1615,16 +1229,9 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
       addPendingQuote(session);
 
       await notifyOwner(
-        `📸 Cliente: ${waId}\n📝 ${details}\n📷 Fotos: ${photos.length}\n\nCopiá y pegá:\n${waId} 7500\n${waId} 7500-2500\n${waId} 0\n${waId} cat`,
+        `📸 Cliente: ${waId}\n📝 ${details}\n📷 Fotos: ${photos.length}`,
         photos[0]?.imageId || null
       );
-
-      for (let i = 1; i < photos.length; i++) {
-        await notifyOwner(
-          `Foto ${i + 1}/${photos.length} (cliente ${waId})`,
-          photos[i]?.imageId || null
-        );
-      }
 
       resetCloseTimer(session);
     });
@@ -1640,6 +1247,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
 
   if (session.state === "ESPERANDO_CONFIRMACION_VENDEDOR") return;
 
+  // PRECIO_ENVIADO
   if (session.state === "PRECIO_ENVIADO") {
     resetCloseTimer(session);
 
@@ -1698,6 +1306,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     }
   }
 
+  // PREGUNTANDO_METODO
   if (session.state === "PREGUNTANDO_METODO") {
     const method = detectDeliveryMethod(text);
     if (method === "envio") {
@@ -1720,6 +1329,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     }
   }
 
+  // PIDIENDO_DATOS
   if (session.state === "PIDIENDO_DATOS" || session.state === "PIDIENDO_DATOS_RECOGER") {
     session.shipping_details = String(text || "");
     session.sinpe_reference = generateSinpeReference(waId);
@@ -1744,35 +1354,26 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     };
     session.state = "ESPERANDO_SINPE";
 
-    if (SINPE_SMS_SECRET) startSinpeWaitTimer(waId, session);
-
     await notifyOwner(
-      `💳 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference}\n💵 ₡${total.toLocaleString()}\n📝 ${session.shipping_details}\n\nEsperando comprobante.\nPara confirmar luego: ${waId} pagado`
+      `💳 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference}\n💵 ₡${total.toLocaleString()}\n📝 ${session.shipping_details}`
     );
 
     resetCloseTimer(session);
     return;
   }
 
+  // ESPERANDO_SINPE
   if (session.state === "ESPERANDO_SINPE") {
     const lower = norm(text);
-
-    const saysPaid =
-      lower.includes("listo") ||
-      lower.includes("pague") ||
-      lower.includes("transferi") ||
-      lower === "ya pague" ||
-      lower.includes("ya");
+    const saysPaid = lower.includes("listo") || lower.includes("pague") || lower.includes("transferi") || lower === "ya pague" || lower.includes("ya");
 
     if (saysPaid) {
-      await sendWhatsApp(
-        waId,
-        "Listo 🙌 Para validar el pago, tenés que *adjuntar la foto del comprobante SINPE* aquí mismo 🧾📸\n\nEnviála en un solo mensaje por favor."
-      );
+      await sendWhatsApp(waId, "Listo 🙌 Para validar el pago, tenés que *adjuntar la foto del comprobante SINPE* aquí mismo 🧾📸\n\nEnviála en un solo mensaje por favor.");
       return;
     }
   }
 
+  // FAQs rápidas
   const lower = norm(text);
 
   if (/\b(envio|entregan|delivery|envian)\b/.test(lower)) {
@@ -1800,17 +1401,14 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
   }
 
   if (hasPhysicalLocation() && /\b(ubicacion|donde|direccion)\b/.test(lower)) {
-    await sendWhatsApp(
-      waId,
-      `📍 ${STORE_ADDRESS}\n🕒 ${HOURS_DAY}${MAPS_URL ? `\n\n🗺️ ${MAPS_URL}` : ""}`
-    );
+    await sendWhatsApp(waId, `📍 ${STORE_ADDRESS}\n🕒 ${HOURS_DAY}${MAPS_URL ? `\n\n🗺️ ${MAPS_URL}` : ""}`);
     return;
   }
 
+  // Saludo
   if (isGreeting(text) && String(text || "").length < 25) {
     const catalogMsg = getCatalogLinks();
-    const greeting =
-      `${fraseNoRepetir("saludos", waId)}\n\n` +
+    const greeting = `${fraseNoRepetir("saludos", waId)}\n\n` +
       `${catalogMsg ? catalogMsg + "\n\n" : ""}` +
       `Mandáme una foto del producto que te interesa 📸`;
     await sendWhatsApp(waId, greeting);
@@ -1827,6 +1425,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     return;
   }
 
+  // IA fallback
   if (shouldUseAI(session, text, hasImage)) {
     const ai = await aiHandleMessage(text, session);
     if (ai?.reply) {
@@ -1837,6 +1436,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     }
   }
 
+  // Fallback final
   const catalogMsg = !session.catalog_sent ? getCatalogLinks() : "";
   const fallback = catalogMsg
     ? `${catalogMsg}\n\nMandáme una foto del producto 📸`
@@ -1847,7 +1447,80 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
 
 /**
  ============================
- WEBHOOKS + ENDPOINTS
+ SOCKET.IO - PANEL WEB
+ ============================
+ */
+io.on("connection", (socket) => {
+  console.log("🔌 Panel conectado:", socket.id);
+  
+  let authenticated = false;
+  
+  // Autenticación con PIN
+  socket.on("auth", (pin) => {
+    if (pin === PANEL_PIN) {
+      authenticated = true;
+      socket.emit("auth_success", { storeName: STORE_NAME });
+      
+      // Enviar datos iniciales
+      socket.emit("init_data", {
+        pending: Array.from(pendingQuotes.values()),
+        history: chatHistory.slice(-50),
+        metrics: account.metrics,
+        tokens: { total: tokensTotal(), remaining: tokensRemaining() },
+      });
+      
+      console.log("✅ Panel autenticado:", socket.id);
+    } else {
+      socket.emit("auth_error", "PIN incorrecto");
+    }
+  });
+  
+  // Middleware de autenticación
+  socket.use((packet, next) => {
+    if (packet[0] === "auth") return next();
+    if (!authenticated) {
+      return next(new Error("No autenticado"));
+    }
+    next();
+  });
+  
+  // Ejecutar acción
+  socket.on("action", async (data) => {
+    const { clientWaId, actionType, payload } = data;
+    console.log("📱 Acción desde panel:", actionType, clientWaId);
+    
+    const result = await executeAction(clientWaId, actionType, payload || {});
+    socket.emit("action_result", result);
+  });
+  
+  // Obtener pendientes
+  socket.on("get_pending", () => {
+    socket.emit("pending_list", Array.from(pendingQuotes.values()));
+  });
+  
+  // Obtener historial de un cliente
+  socket.on("get_client_history", (waId) => {
+    const clientHistory = chatHistory.filter(m => m.waId === waId);
+    socket.emit("client_history", { waId, messages: clientHistory });
+  });
+  
+  // Obtener métricas
+  socket.on("get_metrics", () => {
+    socket.emit("metrics", {
+      metrics: account.metrics,
+      tokens: { total: tokensTotal(), remaining: tokensRemaining() },
+      sessions: { total: sessions.size, active: Array.from(sessions.values()).filter(s => s.state !== "CERRADO_TIMEOUT").length },
+    });
+  });
+  
+  socket.on("disconnect", () => {
+    console.log("🔌 Panel desconectado:", socket.id);
+  });
+});
+
+/**
+ ============================
+ WEBHOOKS META
  ============================
  */
 app.post("/webhook", (req, res) => {
@@ -1875,16 +1548,8 @@ app.post("/webhook", (req, res) => {
 
             const from = normalizeCRPhone(msg.from);
 
-            if (ownerDigits && from === ownerDigits) {
-              if (msg.type === "text") {
-                await handleOwnerCommand(ownerDigits, msg.text?.body || "");
-              } else if (msg.type === "interactive") {
-                const i = msg.interactive;
-                const id = i?.button_reply?.id || i?.list_reply?.id || "";
-                await handleOwnerCommand(ownerDigits, id);
-              }
-              continue;
-            }
+            // El dueño no se procesa por el bot (usa el panel)
+            if (ownerDigits && from === ownerDigits) continue;
 
             let text = "";
             let hasImage = false;
@@ -1925,6 +1590,11 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+/**
+ ============================
+ ENDPOINTS API
+ ============================
+ */
 app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
@@ -1935,41 +1605,18 @@ app.get("/status", (req, res) => {
 
   ensureMonthlyReset();
 
-  const activeSessions = Array.from(sessions.values()).filter(
-    (s) => s.state !== "CERRADO_TIMEOUT"
-  );
-
   res.json({
     account: {
       month: account.month_key,
-      tokens: {
-        total: tokensTotal(),
-        used: account.tokens_used,
-        remaining: tokensRemaining(),
-      },
+      tokens: { total: tokensTotal(), used: account.tokens_used, remaining: tokensRemaining() },
       metrics: account.metrics,
     },
-    sessions: { total: sessions.size, active: activeSessions.length },
+    sessions: { total: sessions.size },
     config: {
       store: STORE_NAME,
       type: STORE_TYPE,
       hours: HOURS_DAY,
-      sinpe: SINPE_NUMBER ? "✅" : "❌",
-      catalog: CATALOG_URL || CATALOG_URLS ? "✅" : "❌",
-      ai: OPENAI_API_KEY ? "✅" : "❌",
-      security: APP_SECRET ? "✅" : "❌",
-      graph_api_version: GRAPH_API_VERSION,
-      persist: {
-        sessions: SESSIONS_PERSIST ? "✅" : "❌",
-        stats: STATS_PERSIST ? "✅" : "❌",
-        profiles: PROFILES_PERSIST ? "✅" : "❌",
-      },
-      premium: {
-        confirm_owner: REQUIRE_OWNER_CONFIRM ? "✅" : "❌",
-        abandoned_reminder: PRO_REMINDER ? `✅ (${ABANDONED_REMINDER_HOURS}h)` : "❌",
-        vip: vipSet.size,
-        blocked: blockedSet.size,
-      },
+      panel: "✅ Activo",
     },
   });
 });
@@ -1977,38 +1624,17 @@ app.get("/status", (req, res) => {
 app.get("/inbox", (req, res) => {
   if (ADMIN_KEY && req.query.key !== ADMIN_KEY)
     return res.status(401).send("Unauthorized");
-  const pending = Array.from(pendingQuotes.values());
-  res.json({ pending, count: pending.length });
-});
-
-app.post("/packs/activate", (req, res) => {
-  if (ADMIN_KEY && req.query.key !== ADMIN_KEY)
-    return res.status(401).send("Unauthorized");
-  ensureMonthlyReset();
-  account.tokens_packs_added += PACK_TOKENS;
-  if (STATS_PERSIST) saveStatsToDisk();
-  res.json({ success: true, tokens: tokensTotal(), remaining: tokensRemaining() });
-});
-
-app.get("/", (req, res) => {
-  res.send(
-    `<h1>${STORE_NAME} - TICO-bot 🤖</h1>
-     <p>Tipo: ${STORE_TYPE}</p>
-     <p>Fichas: ${tokensRemaining()}/${tokensTotal()}</p>
-     <p>IA: ${OPENAI_API_KEY ? "✅" : "❌"} (${account.metrics.ai_calls} llamadas)</p>
-     <p>Graph API: ${GRAPH_API_VERSION}</p>`
-  );
+  res.json({ pending: Array.from(pendingQuotes.values()), count: pendingQuotes.size });
 });
 
 /**
  ============================
- GARBAGE COLLECTOR (memoria)
+ GARBAGE COLLECTOR
  ============================
  */
 const GC_INTERVAL_MS = 10 * 60 * 1000;
 const SESSION_GC_MS = 6 * 60 * 60 * 1000;
 const PHOTO_GC_MS = 2 * 60 * 1000;
-const OWNER_CONFIRM_TTL_MS = 10 * 60 * 1000;
 
 setInterval(() => {
   const now = Date.now();
@@ -2031,11 +1657,6 @@ setInterval(() => {
     }
   }
 
-  for (const [id, c] of ownerConfirm.entries()) {
-    if (!c) continue;
-    if (now - (c.created_at || 0) > OWNER_CONFIRM_TTL_MS) ownerConfirm.delete(id);
-  }
-
   for (const [id, ts] of processedMsgIds.entries()) {
     if (now - ts > DEDUPE_TTL_MS) processedMsgIds.delete(id);
   }
@@ -2047,7 +1668,7 @@ setInterval(() => {
  ============================
  */
 setInterval(() => {
-  console.log("⏰ Keep-alive");
+  console.log("⏰ Keep-alive | Pendientes:", pendingQuotes.size, "| Sesiones:", sessions.size);
 }, 5 * 60 * 1000);
 
 /**
@@ -2057,24 +1678,26 @@ setInterval(() => {
  */
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   loadProfilesFromDisk();
   loadSessionsFromDisk();
   loadStatsFromDisk();
 
-  console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
-  console.log(
-    `\n🤖 TICO-BOT | Puerto ${PORT} | ${STORE_NAME} (${STORE_TYPE})\n` +
-      `🎟️ Fichas: ${tokensRemaining()}/${tokensTotal()} | 🤖 IA: ${OPENAI_API_KEY ? "ON" : "OFF"}\n` +
-      `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${SESSIONS_PERSIST ? "ON" : "OFF"} | M=${STATS_PERSIST ? "ON" : "OFF"} | P=${PROFILES_PERSIST ? "ON" : "OFF"}\n` +
-      `🌐 Graph API: ${GRAPH_API_VERSION}\n` +
-      `⭐ VIP: ${vipSet.size} | ⛔ Bloqueados: ${blockedSet.size} | ✅ Confirm: ${REQUIRE_OWNER_CONFIRM ? "ON" : "OFF"}\n`
-  );
+  console.log(`
+╔═══════════════════════════════════════════════════╗
+║  🤖 TICO-BOT con PANEL WEB                        ║
+╠═══════════════════════════════════════════════════╣
+║  📍 Puerto: ${String(PORT).padEnd(37)}║
+║  🏪 Tienda: ${STORE_NAME.slice(0, 36).padEnd(37)}║
+║  🔐 PIN Panel: ${PANEL_PIN.padEnd(34)}║
+║  🎟️ Fichas: ${String(tokensRemaining() + "/" + tokensTotal()).padEnd(36)}║
+║  🤖 IA: ${(OPENAI_API_KEY ? "Activa" : "Inactiva").padEnd(41)}║
+╠═══════════════════════════════════════════════════╣
+║  📱 Panel: http://localhost:${PORT}/                  ║
+╚═══════════════════════════════════════════════════╝
+  `);
 
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-    console.log("⚠️ Modo SIM activo: faltan WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID");
-  }
-  if (OWNER_PHONE && normalizeCRPhone(OWNER_PHONE).length < 10) {
-    console.log("⚠️ OWNER_PHONE parece corto. Recomendado: 506XXXXXXXX (sin +)");
+    console.log("⚠️ Modo SIM: faltan credenciales WhatsApp");
   }
 });
