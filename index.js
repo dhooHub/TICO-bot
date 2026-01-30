@@ -1,6 +1,6 @@
 /**
  * TICO-bot (WhatsApp Cloud API)
- * index.js — versión completa, revisada y lista para copiar/pegar
+ * index.js — versión completa + upgrades (confirmaciones dueño SI/NO/EDITAR, SINPE con comprobante, VIP/tags/bloqueo, abandonados 2h)
  */
 
 const express = require("express");
@@ -32,7 +32,7 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 const OWNER_PHONE = process.env.OWNER_PHONE || ""; // Recomendado: 506XXXXXXXX (sin +)
 const APP_SECRET = process.env.APP_SECRET || "";
 
-const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v24.0"; // ✅ Meta ya te muestra v24
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || "v24.0";
 
 const STORE_NAME = process.env.STORE_NAME || "TICO-bot";
 const CATALOG_URLS = process.env.CATALOG_URLS || "";
@@ -66,13 +66,19 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const STATS_PERSIST = String(process.env.STATS_PERSIST || "") === "1";
 const SESSIONS_PERSIST = String(process.env.SESSIONS_PERSIST || "") === "1";
 
+// ✅ Premium-deluxe
+const VIP_PERSIST = String(process.env.VIP_PERSIST || "1") === "1";
+const PROFILES_PERSIST = String(process.env.PROFILES_PERSIST || "1") === "1"; // tags/bloqueo/notas
+const REQUIRE_OWNER_CONFIRM = String(process.env.REQUIRE_OWNER_CONFIRM || "1") === "1";
+
 const SESSION_TIMEOUT_HOURS = Number(process.env.SESSION_TIMEOUT_HOURS || 2);
 const PHOTO_WAIT_SECONDS = Number(process.env.PHOTO_WAIT_SECONDS || 5);
 
 const SINPE_SMS_SECRET = process.env.SINPE_SMS_SECRET || "";
 const SINPE_WAIT_MINUTES = Number(process.env.SINPE_WAIT_MINUTES || 3);
 
-const PRO_REMINDER = String(process.env.PRO_REMINDER || "") === "1";
+// ✅ abandonados / follow-up 2h (sin 24h)
+const PRO_REMINDER = String(process.env.PRO_REMINDER || "1") === "1";
 
 /**
  ============================
@@ -193,6 +199,93 @@ const CLOSE_AFTER_MS = SESSION_TIMEOUT_HOURS * 60 * 60 * 1000;
 const photoBuffers = new Map();
 const sinpeWaitTimers = new Map();
 const pendingQuotes = new Map();
+
+/**
+ ============================
+ PREMIUM: VIP / BLOQUEO / TAGS / NOTAS
+ ============================
+ */
+const PROFILES_FILE = path.join(process.cwd(), "profiles.json");
+const profiles = new Map(); // waId -> { tags:[], note:"", blocked:false, vip:false, created_at, updated_at }
+
+function getProfile(waId) {
+  const id = String(waId || "");
+  if (!profiles.has(id)) {
+    profiles.set(id, {
+      waId: id,
+      tags: [],
+      note: "",
+      blocked: false,
+      vip: false,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  }
+  return profiles.get(id);
+}
+
+function touchProfile(p) {
+  p.updated_at = new Date().toISOString();
+}
+
+function saveProfilesToDisk() {
+  if (!PROFILES_PERSIST) return;
+  try {
+    const arr = Array.from(profiles.values());
+    safeWriteJson(PROFILES_FILE, arr);
+  } catch (e) {
+    console.log("⚠️ Error guardando profiles:", e?.message);
+  }
+}
+
+function loadProfilesFromDisk() {
+  if (!PROFILES_PERSIST) return;
+  try {
+    if (!fs.existsSync(PROFILES_FILE)) return;
+    const arr = JSON.parse(fs.readFileSync(PROFILES_FILE, "utf-8"));
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (p?.waId) profiles.set(String(p.waId), p);
+      }
+      console.log(`👤 Profiles cargados: ${profiles.size}`);
+    }
+  } catch (e) {
+    console.log("⚠️ Error cargando profiles:", e?.message);
+  }
+}
+
+setInterval(() => {
+  if (PROFILES_PERSIST && profiles.size > 0) saveProfilesToDisk();
+}, 5 * 60 * 1000);
+
+/**
+ ============================
+ CONFIRMACIONES DUEÑO: SI / NO / EDITAR
+ ============================
+ */
+const ownerPendingConfirm = new Map(); // ownerWaId -> { action, preview, created_at }
+const ownerEditMode = new Map(); // ownerWaId -> true si pidió EDITAR
+
+function setOwnerPending(ownerWaId, action, preview) {
+  ownerPendingConfirm.set(String(ownerWaId), {
+    action,
+    preview,
+    created_at: Date.now(),
+  });
+}
+
+function clearOwnerPending(ownerWaId) {
+  ownerPendingConfirm.delete(String(ownerWaId));
+  ownerEditMode.delete(String(ownerWaId));
+}
+
+function getOwnerPending(ownerWaId) {
+  return ownerPendingConfirm.get(String(ownerWaId));
+}
+
+function formatConfirmPreview(preview) {
+  return `🧾 Confirmá el envío:\n\n${preview}\n\nRespondé con los botones:`;
+}
 
 /**
  ============================
@@ -322,6 +415,9 @@ const account = {
     night_leads: 0,
     sinpe_confirmed: 0,
     ai_calls: 0,
+    receipts_forwarded: 0,
+    vip_routed: 0,
+    blocked_hits: 0,
   },
 };
 
@@ -401,7 +497,6 @@ function addPendingQuote(session) {
 function removePendingQuote(waId) {
   pendingQuotes.delete(waId);
 }
-
 /**
  ============================
  SESIONES
@@ -424,7 +519,10 @@ function getSession(waId) {
       close_timer: null,
       reminder_timer: null,
 
+      // ✅ “abandonados” 2h aplica aunque solo se haya enviado precio
       last_offer: null,
+      last_offer_sent_at: null,
+
       delivery_method: null,
 
       pending_sinpe: null,
@@ -435,6 +533,9 @@ function getSession(waId) {
 
       ai_used_count: 0,
       message_history: [],
+
+      // ✅ para “Ya pagué” -> pide comprobante
+      waiting_receipt: false,
     });
     account.metrics.new_contacts += 1;
     if (STATS_PERSIST) saveStatsToDisk();
@@ -442,24 +543,40 @@ function getSession(waId) {
   return sessions.get(waId);
 }
 
-function resetCloseTimer(session) {
+function clearTimers(session) {
   if (session.close_timer) clearTimeout(session.close_timer);
   if (session.reminder_timer) clearTimeout(session.reminder_timer);
+  session.close_timer = null;
+  session.reminder_timer = null;
+}
 
+async function sendAbandonedReminder(session) {
+  // Solo si sigue “en el aire”
+  if (session.paused) return;
+  if (session.state !== "PRECIO_ENVIADO") return;
+  if (!session.last_offer) return;
+
+  const price = session.last_offer?.price || 0;
+  const shipping = session.last_offer?.shipping || 0;
+  const total = price + shipping;
+
+  await sendWhatsApp(
+    session.waId,
+    `Hola 🙌 ¿Seguís interesad@?\n\nPrecio: ₡${total.toLocaleString()}\nSi querés, podés reenviar la foto.`
+  );
+}
+
+function resetCloseTimer(session) {
+  clearTimers(session);
+
+  // ✅ Recordatorio abandonado a las 2h después de enviar precio (si queda en el aire)
   if (PRO_REMINDER && session.state === "PRECIO_ENVIADO" && session.last_offer) {
     session.reminder_timer = setTimeout(async () => {
-      if (session.state === "PRECIO_ENVIADO") {
-        const price = session.last_offer?.price || 0;
-        const shipping = session.last_offer?.shipping || 0;
-        const total = price + shipping;
-        await sendWhatsApp(
-          session.waId,
-          `Hola, ¿todavía estás interesad@ en el producto? 🙌\n\nPrecio: ₡${total.toLocaleString()}\n\nSi querés, podés reenviar la foto.`
-        );
-      }
+      await sendAbandonedReminder(session);
     }, CLOSE_AFTER_MS);
   }
 
+  // ✅ cierre de caso (2h) o (2h + 1h) si hay reminder activo
   const closeDelay = PRO_REMINDER
     ? CLOSE_AFTER_MS + 60 * 60 * 1000
     : CLOSE_AFTER_MS;
@@ -479,14 +596,22 @@ function resetCase(session) {
   session.last_details_text = null;
   session.details_log = [];
   session.sent_to_seller = false;
+
   session.last_offer = null;
+  session.last_offer_sent_at = null;
+
   session.delivery_method = null;
   session.pending_sinpe = null;
   session.shipping_details = null;
   session.sinpe_reference = null;
+
   session.ai_used_count = 0;
   session.message_history = [];
+
+  session.waiting_receipt = false;
+
   removePendingQuote(session.waId);
+  clearTimers(session);
 }
 
 /**
@@ -543,7 +668,7 @@ function handlePhotoBuffer(waId, imageId, caption, callback) {
 
 /**
  ============================
- TIMEOUT VERIFICACIÓN SINPE
+ TIMEOUT VERIFICACIÓN SINPE (opcional)
  ============================
  */
 function startSinpeWaitTimer(waId, session) {
@@ -598,7 +723,13 @@ const FRASES = {
     "¡Afirmativo! Sí lo tenemos 👍",
     "¡Qué dicha, sí hay! 🙌",
   ],
-  confirmacion: ["¡Buenísimo! 🙌", "¡Perfecto! 🎉", "¡Qué bien! 🙌", "¡Excelente! 👍", "¡Dale! 🙌"],
+  confirmacion: [
+    "¡Buenísimo! 🙌",
+    "¡Perfecto! 🎉",
+    "¡Qué bien! 🙌",
+    "¡Excelente! 👍",
+    "¡Dale! 🙌",
+  ],
   no_quiere: [
     "Con gusto 🙌 Si ves algo más, mandame la foto.",
     "Está bien 🙌 Cualquier cosa aquí estamos.",
@@ -612,7 +743,13 @@ const FRASES = {
     "Uy, ese se nos agotó 🙌 ¿Querés ver otra opción?",
     "No lo tenemos disponible 😔 Pero si ves otro, con gusto te ayudo.",
   ],
-  gracias: ["¡Gracias! 🙌", "¡Pura vida! 🙌", "¡Gracias por la confianza! 💪", "¡Tuanis! 🙌", "¡Con mucho gusto! 😊"],
+  gracias: [
+    "¡Gracias! 🙌",
+    "¡Pura vida! 🙌",
+    "¡Gracias por la confianza! 💪",
+    "¡Tuanis! 🙌",
+    "¡Con mucho gusto! 😊",
+  ],
 };
 
 const lastUsed = new Map();
@@ -645,9 +782,18 @@ function isGreeting(text) {
 }
 function isYes(text) {
   const t = String(text || "").trim().toLowerCase();
-  return ["si", "sí", "sii", "claro", "lo quiero", "dale", "va", "listo", "ok", "de una"].some(
-    (k) => t === k || t.startsWith(k)
-  );
+  return [
+    "si",
+    "sí",
+    "sii",
+    "claro",
+    "lo quiero",
+    "dale",
+    "va",
+    "listo",
+    "ok",
+    "de una",
+  ].some((k) => t === k || t.startsWith(k));
 }
 function isNo(text) {
   const t = String(text || "").trim().toLowerCase();
@@ -657,20 +803,31 @@ function isNo(text) {
 }
 function detectDeliveryMethod(text) {
   const t = String(text || "").trim().toLowerCase();
-  if (t.includes("envio") || t.includes("envío") || t === "si" || t === "sí") return "envio";
-  if (t.includes("recoger") || t.includes("retiro") || t.includes("tienda") || t === "no") return "recoger";
+  if (t.includes("envio") || t.includes("envío") || t === "si" || t === "sí")
+    return "envio";
+  if (
+    t.includes("recoger") ||
+    t.includes("retiro") ||
+    t.includes("tienda") ||
+    t === "no"
+  )
+    return "recoger";
   return null;
 }
 
 /**
  ============================
  WHATSAPP API (texto, imagen, botones, lista)
- - Incluye log real si Meta responde error (400/401/403/etc.)
  ============================
  */
 async function waPost(payload, label = "WA") {
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
-    console.log(`📤 [SIM-${label}]`, payload?.to, payload?.type || "", JSON.stringify(payload).slice(0, 200));
+    console.log(
+      `📤 [SIM-${label}]`,
+      payload?.to,
+      payload?.type || "",
+      JSON.stringify(payload).slice(0, 200)
+    );
     return { ok: true, status: 200, text: "SIM" };
   }
 
@@ -791,7 +948,6 @@ async function notifyOwner(message, imageId = null) {
   if (imageId) return sendImage(OWNER_PHONE, imageId, message);
   return sendWhatsApp(OWNER_PHONE, message);
 }
-
 /**
  ============================
  INBOX LIST (dueño) - viejos primero + paginación
@@ -852,7 +1008,44 @@ async function showInboxList(ownerWaId, page = 0) {
 
 /**
  ============================
+ CONFIRMACIONES DUEÑO (SI / NO / EDITAR)
+ - Cada acción sensible se manda como “preview” al dueño
+ - Dueño responde: SI | NO | EDITAR <texto nuevo>
+ ============================
+ */
+const ownerConfirm = new Map(); // key: ownerWaId -> { type, clientWaId, payload... }
+
+function setOwnerConfirm(ownerWaId, data) {
+  ownerConfirm.set(ownerWaId, { ...data, created_at: Date.now() });
+}
+function getOwnerConfirm(ownerWaId) {
+  const c = ownerConfirm.get(ownerWaId);
+  if (!c) return null;
+  // TTL 10 min
+  if (Date.now() - (c.created_at || 0) > 10 * 60 * 1000) {
+    ownerConfirm.delete(ownerWaId);
+    return null;
+  }
+  return c;
+}
+function clearOwnerConfirm(ownerWaId) {
+  ownerConfirm.delete(ownerWaId);
+}
+
+async function askOwnerConfirm(ownerWaId, previewText) {
+  await sendButtons(ownerWaId, `🧾 Confirmar envío:\n\n${previewText}`, [
+    { id: "OWNER_YES", title: "SI" },
+    { id: "OWNER_NO", title: "NO" },
+    { id: "OWNER_EDIT", title: "EDITAR" },
+  ]);
+}
+
+/**
+ ============================
  PARSEO COMANDO DUEÑO (con número)
+ - Cambios: 0 -> NO_HAY (mensaje “No hay”)
+ - cat -> catálogo (sin tilde también)
+ - precio requiere número de cliente SIEMPRE
  ============================
  */
 function parseOwnerCommand(text) {
@@ -863,18 +1056,24 @@ function parseOwnerCommand(text) {
   const clientNum = parts[0].replace(/[^\d]/g, "");
   if (clientNum.length < 8) return null;
 
-  const cmd = parts[1].toLowerCase();
+  const cmd = norm(parts[1]);
+
   if (cmd === "pagado" || cmd === "pago" || cmd === "ok")
     return { type: "PAGADO", clientWaId: clientNum };
+
   if (cmd === "0" || cmd === "no" || cmd === "nohay" || cmd === "agotado")
     return { type: "NO_HAY", clientWaId: clientNum };
+
   if (cmd === "pausa" || cmd === "pausar" || cmd === "stop")
     return { type: "PAUSA", clientWaId: clientNum };
+
   if (cmd === "bot" || cmd === "reanudar" || cmd === "activar")
     return { type: "REANUDAR", clientWaId: clientNum };
-  if (cmd === "cat" || cmd === "catalogo" || cmd === "catálogo")
+
+  if (cmd === "cat" || cmd === "catalogo")
     return { type: "CATALOGO", clientWaId: clientNum };
 
+  // precio: 7500 o 7500-2500
   const priceStr = parts[1].replace(/[^\d-]/g, "");
   if (priceStr.includes("-")) {
     const [p, s] = priceStr.split("-");
@@ -892,23 +1091,69 @@ function parseOwnerCommand(text) {
     if (price > 0)
       return { type: "PRECIO", clientWaId: clientNum, price, shipping: null };
   }
+
   return null;
 }
 
 /**
  ============================
  HANDLER DUEÑO (inbox + resolve + acciones)
+ - Añade confirmación SI/NO/EDITAR para:
+   PRECIO, NO_HAY, CATALOGO, PAGADO
  ============================
  */
 async function handleOwnerCommand(waId, text) {
   const raw = String(text || "").trim();
   const tnorm = norm(raw);
 
+  // Confirmación rápida por botones
+  if (tnorm === "owner_yes" || tnorm === "owner_no" || tnorm === "owner_edit") {
+    const pending = getOwnerConfirm(waId);
+    if (!pending) {
+      await sendWhatsApp(waId, "ℹ️ No hay nada pendiente por confirmar.");
+      return true;
+    }
+
+    if (tnorm === "owner_no") {
+      clearOwnerConfirm(waId);
+      await sendWhatsApp(waId, "✅ Cancelado.");
+      return true;
+    }
+
+    if (tnorm === "owner_edit") {
+      // El siguiente mensaje del dueño debe ser: EDITAR <nuevo texto>
+      await sendWhatsApp(waId, `Escribí:\nEDITAR <mensaje nuevo>`);
+      return true;
+    }
+
+    // OWNER_YES
+    const ok = await executeOwnerAction(waId, pending, null);
+    if (ok) clearOwnerConfirm(waId);
+    return true;
+  }
+
+  // EDITAR <texto>
+  if (tnorm.startsWith("editar ")) {
+    const pending = getOwnerConfirm(waId);
+    if (!pending) {
+      await sendWhatsApp(waId, "ℹ️ No hay nada pendiente por editar.");
+      return true;
+    }
+    const newText = raw.slice(7).trim();
+    if (!newText) {
+      await sendWhatsApp(waId, "⚠️ Pegá el mensaje nuevo después de EDITAR.");
+      return true;
+    }
+    const ok = await executeOwnerAction(waId, pending, newText);
+    if (ok) clearOwnerConfirm(waId);
+    return true;
+  }
+
+  // Inbox / pendientes
   if (tnorm === "pendientes" || tnorm === "inbox") {
     await showInboxList(waId, 0);
     return true;
   }
-
   if (tnorm.startsWith("inbox_next_")) {
     const nextPage = Number(raw.replace(/^INBOX_NEXT_/i, "")) || 0;
     await showInboxList(waId, nextPage);
@@ -919,12 +1164,10 @@ async function handleOwnerCommand(waId, text) {
     await showInboxList(waId, prevPage);
     return true;
   }
-
   if (tnorm === "inbox_back") {
     await showInboxList(waId, getOwnerPage(waId));
     return true;
   }
-
   if (tnorm.startsWith("resolve_")) {
     const num = raw.replace(/^RESOLVE_/i, "").replace(/[^\d]/g, "");
     if (pendingQuotes.has(num)) {
@@ -936,7 +1179,6 @@ async function handleOwnerCommand(waId, text) {
     await showInboxList(waId, getOwnerPage(waId));
     return true;
   }
-
   if (tnorm.startsWith("pend_")) {
     const num = raw.replace(/^PEND_/i, "").replace(/[^\d]/g, "");
     const p = pendingQuotes.get(num);
@@ -950,7 +1192,8 @@ Ejemplos:
 ${num} 7500
 ${num} 7500-2500
 ${num} 0
-${num} pagado`;
+${num} pagado
+${num} cat`;
 
     await sendButtons(waId, msg, [
       { id: `RESOLVE_${num}`, title: "✅ Resuelto" },
@@ -959,52 +1202,145 @@ ${num} pagado`;
     return true;
   }
 
+  // Parse comando con número
   const cmd = parseOwnerCommand(raw);
-  if (!cmd) return false;
+  if (!cmd) {
+    // ✅ Si el dueño escribió SOLO “7500” sin número, avisar
+    const onlyPrice = raw.replace(/[^\d]/g, "");
+    if (onlyPrice.length >= 3 && onlyPrice.length <= 6) {
+      await sendWhatsApp(
+        waId,
+        `⚠️ Te faltó el número del cliente.\nEj: 506XXXXXXXX ${onlyPrice}`
+      );
+      return true;
+    }
+    return false;
+  }
 
+  // Previews + confirm
   const clientSession = getSession(cmd.clientWaId);
-
-  if (["PRECIO", "NO_HAY", "PAGADO"].includes(cmd.type))
-    removePendingQuote(cmd.clientWaId);
 
   if (cmd.type === "PRECIO") {
     const { price, shipping } = cmd;
-    clientSession.last_offer = { price, shipping: shipping || 0 };
-    clientSession.state = "PRECIO_ENVIADO";
-    account.metrics.quotes_sent += 1;
-    if (STATS_PERSIST) saveStatsToDisk();
-
-    const shippingText = shipping
-      ? `\nEnvío: ₡${Number(shipping).toLocaleString()}`
-      : "";
     const total = price + (shipping || 0);
+    const preview =
+      `Cliente: ${cmd.clientWaId}\n` +
+      `Acción: Enviar precio\n` +
+      `Precio: ₡${price.toLocaleString()}` +
+      (shipping ? `\nEnvío: ₡${Number(shipping).toLocaleString()}` : "") +
+      `\nTotal: ₡${total.toLocaleString()}`;
 
-    await sendButtons(
-      cmd.clientWaId,
-      `${fraseNoRepetir("si_hay", cmd.clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}${shippingText}\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`,
-      [
-        { id: "BTN_YES", title: "Sí, lo quiero" },
-        { id: "BTN_NO", title: "No, gracias" },
-        { id: "BTN_MORE", title: "Enviar otra foto" },
-      ]
-    );
-
-    await sendWhatsApp(waId, `✅ Precio enviado`);
-    resetCloseTimer(clientSession);
+    setOwnerConfirm(waId, { type: "PRECIO", clientWaId: cmd.clientWaId, price, shipping: shipping || 0 });
+    await askOwnerConfirm(waId, preview);
     return true;
   }
 
   if (cmd.type === "NO_HAY") {
-    account.metrics.no_stock += 1;
-    if (STATS_PERSIST) saveStatsToDisk();
-
-    await sendWhatsApp(cmd.clientWaId, fraseNoRepetir("no_hay", cmd.clientWaId));
-    await sendWhatsApp(waId, `✅ "No hay" enviado`);
-    resetCase(clientSession);
+    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar "No hay"`;
+    setOwnerConfirm(waId, { type: "NO_HAY", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(waId, preview);
     return true;
   }
 
   if (cmd.type === "PAGADO") {
+    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Confirmar pago (pagado)`;
+    setOwnerConfirm(waId, { type: "PAGADO", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(waId, preview);
+    return true;
+  }
+
+  if (cmd.type === "CATALOGO") {
+    const preview = `Cliente: ${cmd.clientWaId}\nAcción: Enviar catálogo`;
+    setOwnerConfirm(waId, { type: "CATALOGO", clientWaId: cmd.clientWaId });
+    await askOwnerConfirm(waId, preview);
+    return true;
+  }
+
+  // Acciones sin confirm (pausa / reanudar)
+  if (cmd.type === "PAUSA") {
+    clientSession.paused = true;
+    await sendWhatsApp(waId, `⏸️ Bot pausado para ${cmd.clientWaId}. Reanudar: ${cmd.clientWaId} bot`);
+    return true;
+  }
+
+  if (cmd.type === "REANUDAR") {
+    clientSession.paused = false;
+    await sendWhatsApp(waId, `▶️ Bot reanudado para ${cmd.clientWaId}`);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ ============================
+ EJECUTA ACCIÓN CONFIRMADA (o editada)
+ ============================
+ */
+async function executeOwnerAction(ownerWaId, action, overrideText = null) {
+  const clientWaId = action.clientWaId;
+  const clientSession = getSession(clientWaId);
+
+  // Limpia pendientes cuando corresponde
+  if (["PRECIO", "NO_HAY", "PAGADO"].includes(action.type)) removePendingQuote(clientWaId);
+
+  if (action.type === "PRECIO") {
+    const price = Number(action.price || 0);
+    const shipping = Number(action.shipping || 0);
+    clientSession.last_offer = { price, shipping };
+    clientSession.last_offer_sent_at = Date.now();
+    clientSession.state = "PRECIO_ENVIADO";
+    account.metrics.quotes_sent += 1;
+    if (STATS_PERSIST) saveStatsToDisk();
+
+    const total = price + shipping;
+
+    // Mensaje default (o editado por el dueño)
+    const msg =
+      overrideText ||
+      `${fraseNoRepetir("si_hay", clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}` +
+        (shipping ? `\nEnvío: ₡${shipping.toLocaleString()}` : "") +
+        `\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`;
+
+    // botones al cliente
+    await sendButtons(clientWaId, msg, [
+      { id: "BTN_YES", title: "Sí, lo quiero" },
+      { id: "BTN_NO", title: "No, gracias" },
+      { id: "BTN_MORE", title: "Enviar otra foto" },
+    ]);
+
+    // confirm al dueño
+    await sendWhatsApp(ownerWaId, `✅ Listo: precio enviado a ${clientWaId}`);
+    resetCloseTimer(clientSession);
+    return true;
+  }
+
+  if (action.type === "NO_HAY") {
+    account.metrics.no_stock += 1;
+    if (STATS_PERSIST) saveStatsToDisk();
+
+    const msg = overrideText || fraseNoRepetir("no_hay", clientWaId);
+    await sendWhatsApp(clientWaId, msg);
+
+    await sendWhatsApp(ownerWaId, `✅ Listo: "No hay" enviado a ${clientWaId}`);
+    resetCase(clientSession);
+    return true;
+  }
+
+  if (action.type === "CATALOGO") {
+    const catalogMsg = getCatalogLinks();
+    if (!catalogMsg) {
+      await sendWhatsApp(ownerWaId, `⚠️ No hay catálogo configurado`);
+      return true;
+    }
+
+    const msg = overrideText || `¡Hola! ${catalogMsg} 🙌`;
+    await sendWhatsApp(clientWaId, msg);
+    await sendWhatsApp(ownerWaId, `✅ Listo: catálogo enviado a ${clientWaId}`);
+    return true;
+  }
+
+  if (action.type === "PAGADO") {
     if (clientSession.pending_sinpe) {
       clientSession.pending_sinpe.status = "confirmed";
       clientSession.pending_sinpe.confirmed_at = new Date().toISOString();
@@ -1012,55 +1348,110 @@ ${num} pagado`;
     clientSession.state = "PAGO_CONFIRMADO";
     account.metrics.sinpe_confirmed += 1;
     if (STATS_PERSIST) saveStatsToDisk();
-    cancelSinpeWaitTimer(cmd.clientWaId);
+    cancelSinpeWaitTimer(clientWaId);
 
     const deliveryMsg =
       clientSession.delivery_method === "envio"
         ? `Se enviará a: ${clientSession.shipping_details}\nLlegada: ${DELIVERY_DAYS}`
         : hasPhysicalLocation()
-          ? `Podés recogerlo en: ${STORE_ADDRESS}\n${HOURS_DAY}`
-          : "Te contactamos para coordinar";
+        ? `Podés recogerlo en: ${STORE_ADDRESS}\n${HOURS_DAY}`
+        : "Te contactamos para coordinar";
+
+    const msg =
+      overrideText ||
+      `¡Pago confirmado! ${fraseNoRepetir("gracias", clientWaId)}\n\n${deliveryMsg}`;
+
+    await sendWhatsApp(clientWaId, msg);
+    await sendWhatsApp(ownerWaId, `✅ Listo: pago confirmado a ${clientWaId}`);
+
+    // ❌ NO auto-seguimiento 24h (por cobro). Se elimina el reset tardío.
+    // Solo reset cuando el cliente vuelva a escribir o cuando el dueño use RESOLVE / nuevo caso.
+    return true;
+  }
+
+  return true;
+}
+/**
+ ============================
+ VIP + BLOQUEADOS + ETIQUETAS
+ ============================
+ */
+const VIP_NUMBERS = (process.env.VIP_NUMBERS || "")
+  .split(",")
+  .map((x) => waDigits(x))
+  .filter(Boolean);
+
+const BLOCKED_NUMBERS = (process.env.BLOCKED_NUMBERS || "")
+  .split(",")
+  .map((x) => waDigits(x))
+  .filter(Boolean);
+
+const vipSet = new Set(VIP_NUMBERS);
+const blockedSet = new Set(BLOCKED_NUMBERS);
+
+function isVIP(waId) {
+  return vipSet.has(waDigits(waId));
+}
+function isBlocked(waId) {
+  return blockedSet.has(waDigits(waId));
+}
+
+/**
+ ============================
+ RECORDATORIO CHAT ABANDONADO (2h)
+ - Aplica cuando se envió precio y el cliente NO responde (ni sí ni no)
+ - NO usa 24h (evita cobro extra/seguimiento largo)
+ ============================
+ */
+const ABANDONED_REMINDER_HOURS = Number(
+  process.env.ABANDONED_REMINDER_HOURS || 2
+);
+const ABANDONED_REMINDER_MS = ABANDONED_REMINDER_HOURS * 60 * 60 * 1000;
+
+function scheduleAbandonedReminder(session) {
+  if (!PRO_REMINDER) return;
+  if (session.reminder_timer) clearTimeout(session.reminder_timer);
+
+  // Solo si ya se envió precio y no hay respuesta
+  if (session.state !== "PRECIO_ENVIADO" || !session.last_offer) return;
+
+  session.reminder_timer = setTimeout(async () => {
+    if (session.state !== "PRECIO_ENVIADO") return;
+    const offer = session.last_offer || {};
+    const total = Number(offer.price || 0) + Number(offer.shipping || 0);
 
     await sendWhatsApp(
-      cmd.clientWaId,
-      `¡Pago confirmado! ${fraseNoRepetir("gracias", cmd.clientWaId)}\n\n${deliveryMsg}`
+      session.waId,
+      `Hola 🙌 ¿Seguís interesad@?\nTotal: ₡${total.toLocaleString()}\n\nSi querés, reenviame la foto y lo revisamos de nuevo.`
     );
-    await sendWhatsApp(waId, `✅ Pago confirmado`);
+  }, ABANDONED_REMINDER_MS);
+}
 
-    setTimeout(() => {
-      if (clientSession.state === "PAGO_CONFIRMADO") resetCase(clientSession);
-    }, 24 * 60 * 60 * 1000);
+/**
+ ============================
+ AJUSTE resetCloseTimer:
+ - Mantiene cierre a 2h (o 3h si PRO_REMINDER ya estaba sumando 1h)
+ - Agrega recordatorio a las 2h (ABANDONED_REMINDER_HOURS)
+ ============================
+ */
+function resetCloseTimer(session) {
+  if (session.close_timer) clearTimeout(session.close_timer);
+  if (session.reminder_timer) clearTimeout(session.reminder_timer);
 
-    return true;
-  }
+  // Recordatorio 2h si quedó en el aire después de precio
+  scheduleAbandonedReminder(session);
 
-  if (cmd.type === "PAUSA") {
-    clientSession.paused = true;
-    await sendWhatsApp(
-      waId,
-      `⏸️ Bot pausado. Reanudar: ${cmd.clientWaId} bot`
-    );
-    return true;
-  }
+  const closeDelay = PRO_REMINDER
+    ? CLOSE_AFTER_MS + 60 * 60 * 1000
+    : CLOSE_AFTER_MS;
 
-  if (cmd.type === "REANUDAR") {
-    clientSession.paused = false;
-    await sendWhatsApp(waId, `▶️ Bot reanudado`);
-    return true;
-  }
-
-  if (cmd.type === "CATALOGO") {
-    const catalogMsg = getCatalogLinks();
-    if (catalogMsg) {
-      await sendWhatsApp(cmd.clientWaId, `¡Hola! ${catalogMsg} 🙌`);
-      await sendWhatsApp(waId, `✅ Catálogo enviado`);
-    } else {
-      await sendWhatsApp(waId, `⚠️ No hay catálogo`);
-    }
-    return true;
-  }
-
-  return false;
+  session.close_timer = setTimeout(() => {
+    session.state = "CERRADO_TIMEOUT";
+    removePendingQuote(session.waId);
+    account.metrics.closed_timeout += 1;
+    if (SESSIONS_PERSIST) saveSessionsToDisk();
+    if (STATS_PERSIST) saveStatsToDisk();
+  }, closeDelay);
 }
 
 /**
@@ -1150,6 +1541,10 @@ Devolvé SOLO JSON:
 /**
  ============================
  HANDLER CLIENTE (COMPLETO)
+ - VIP: se deriva al dueño sin bot
+ - Bloqueados: ignora
+ - SINPE: envía # y nombre + pide comprobante EN UN SOLO MENSAJE
+ - Comprobante: si llega foto estando ESPERANDO_SINPE -> se reenvía al dueño
  ============================
  */
 async function handleClientMessage(waId, text, hasImage, imageId) {
@@ -1160,6 +1555,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
   account.metrics.chats_total += 1;
   if (STATS_PERSIST) saveStatsToDisk();
 
+  // Normaliza IDs de botones
   if (text === "BTN_YES") text = "si";
   if (text === "BTN_NO") text = "no";
   if (text === "BTN_MORE") text = "otra foto";
@@ -1167,13 +1563,29 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
   if (text === "BTN_RECOGER") text = "recoger";
   if (text === "BTN_YAPAGUE") text = "ya pague";
 
+  // Bloqueados
+  if (isBlocked(waId)) return;
+
+  // VIP: bypass bot (manda todo al dueño y el bot no responde automático)
+  if (isVIP(waId)) {
+    if (hasImage && imageId) {
+      await notifyOwner(`⭐ VIP: ${waId}\n📸 Mensaje con foto\n📝 ${String(text || "").trim() || "(sin texto)"}`, imageId);
+    } else {
+      await notifyOwner(`⭐ VIP: ${waId}\n📝 ${String(text || "").trim() || "(sin texto)"}`);
+    }
+    return;
+  }
+
+  // Bot pausado por el dueño
   if (session.paused) return;
 
+  // Reabrir si estaba cerrado
   if (session.state === "CERRADO_TIMEOUT") {
     resetCase(session);
     session.state = "NEW";
   }
 
+  // Horario (lead nocturno): si pide info sin foto
   if (!isDaytime() && !hasImage) {
     const lower = norm(text);
     const isInfo =
@@ -1189,6 +1601,22 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
+  /**
+   * ✅ COMPROBANTE SINPE:
+   * Si la sesión está esperando SINPE y entra una imagen => se trata como comprobante
+   */
+  if (hasImage && session.state === "ESPERANDO_SINPE" && imageId) {
+    await sendWhatsApp(waId, "¡Listo! 🙌 Recibí el comprobante. Ya se lo paso al encargado para revisión.");
+    await notifyOwner(
+      `🧾 COMPROBANTE SINPE\n📱 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference || "(sin ref)"}\n💵 Esperado: ₡${(session.pending_sinpe?.expectedAmount || 0).toLocaleString()}\n\nSi está OK, respondé:\n${waId} pagado`,
+      imageId
+    );
+    return;
+  }
+
+  /**
+   * 📸 Foto normal (consulta producto)
+   */
   if (hasImage) {
     handlePhotoBuffer(waId, imageId, text, async (photos) => {
       const details = String(text || "").trim() || "(sin detalles)";
@@ -1214,7 +1642,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
       addPendingQuote(session);
 
       await notifyOwner(
-        `📸 Cliente: ${waId}\n📝 ${details}\n📷 Fotos: ${photos.length}\n\nCopiá y pegá:\n${waId} 7500\n${waId} 7500-2500\n${waId} 0`,
+        `📸 Cliente: ${waId}\n📝 ${details}\n📷 Fotos: ${photos.length}\n\nCopiá y pegá:\n${waId} 7500\n${waId} 7500-2500\n${waId} 0\n${waId} cat`,
         photos[0]?.imageId || null
       );
 
@@ -1230,6 +1658,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
+  // Anti-spam links
   if (countLinks(text) > 5) {
     await sendWhatsApp(waId, "Pura vida 🙌 Pasame máximo 5 links para revisarlo bien.");
     return;
@@ -1237,9 +1666,16 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
 
   addToMessageHistory(session, "user", String(text || ""));
 
+  // Si está esperando confirmación del vendedor, no respondes más
   if (session.state === "ESPERANDO_CONFIRMACION_VENDEDOR") return;
 
+  /**
+   * Estado: PRECIO_ENVIADO
+   */
   if (session.state === "PRECIO_ENVIADO") {
+    // Si contesta cualquier cosa (sí/no/otra), reinicia timers
+    resetCloseTimer(session);
+
     if (isYes(text)) {
       if (!canConsumeToken()) return sendWhatsApp(waId, msgOutOfTokens());
       consumeToken("INTENCION_SI");
@@ -1295,6 +1731,9 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
+  /**
+   * Estado: PREGUNTANDO_METODO
+   */
   if (session.state === "PREGUNTANDO_METODO") {
     const method = detectDeliveryMethod(text);
     if (method === "envio") {
@@ -1317,6 +1756,10 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
+  /**
+   * Estado: PIDIENDO_DATOS / PIDIENDO_DATOS_RECOGER
+   * ✅ Aquí se manda SINPE + nombre + pide comprobante en un solo mensaje
+   */
   if (session.state === "PIDIENDO_DATOS" || session.state === "PIDIENDO_DATOS_RECOGER") {
     session.shipping_details = String(text || "");
     session.sinpe_reference = generateSinpeReference(waId);
@@ -1325,14 +1768,14 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     const shipping = session.last_offer?.shipping || 0;
     const total = price + shipping;
 
-    await sendButtons(
-      waId,
-      `¡Perfecto! 🙌\n\nTotal: ₡${total.toLocaleString()}\n\nSINPE: ${SINPE_NUMBER}\nTitular: ${SINPE_NAME}\nRef: ${session.sinpe_reference}\n\nCuando lo hagás, tocá "Ya pagué" 💳`,
-      [
-        { id: "BTN_YAPAGUE", title: "Ya pagué" },
-        { id: "BTN_MORE", title: "Enviar otra foto" },
-      ]
-    );
+    const sinpeMsg =
+      `¡Perfecto! 🙌\n\n` +
+      `Total: ₡${total.toLocaleString()}\n\n` +
+      `SINPE ${SINPE_NUMBER} a nombre de ${SINPE_NAME}\n` +
+      `Ref: ${session.sinpe_reference}\n\n` +
+      `Cuando realicés el pago, por favor enviame el comprobante en *un solo mensaje* 🧾`;
+
+    await sendWhatsApp(waId, sinpeMsg);
 
     session.pending_sinpe = {
       status: "pending",
@@ -1344,30 +1787,53 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     if (SINPE_SMS_SECRET) startSinpeWaitTimer(waId, session);
 
     await notifyOwner(
-      `💳 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference}\n💵 ₡${total.toLocaleString()}\n📝 ${session.shipping_details}\n\nResponder: ${waId} pagado`
+      `💳 Cliente: ${waId}\n🔑 Ref: ${session.sinpe_reference}\n💵 ₡${total.toLocaleString()}\n📝 ${session.shipping_details}\n\nEsperando comprobante.\nPara confirmar luego: ${waId} pagado`
     );
 
     resetCloseTimer(session);
     return;
   }
 
-  if (session.state === "ESPERANDO_SINPE") {
-    const lower = norm(text);
-    if (
-      lower.includes("listo") ||
-      lower.includes("pague") ||
-      lower.includes("pagué") ||
-      lower.includes("transferi") ||
-      lower.includes("ya")
-    ) {
-      await sendWhatsApp(waId, "Recibido 🙌 Déjame verificarlo.");
-      await notifyOwner(
-        `⚠️ ${waId} dice que pagó\n🔑 Ref: ${session.sinpe_reference}\n\nResponder: ${waId} pagado`
-      );
-      return;
-    }
+  /**
+   * Estado: ESPERANDO_SINPE (texto)
+   */
+ if (session.state === "ESPERANDO_SINPE") {
+  const lower = norm(text);
+
+  const saysPaid =
+    lower.includes("listo") ||
+    lower.includes("pague") ||
+    lower.includes("pagué") ||
+    lower.includes("transferi") ||
+    lower.includes("transferí") ||
+    lower === "ya pague" ||
+    lower === "ya pagué" ||
+    lower.includes("ya");
+
+  // 🚨 DICE QUE PAGÓ PERO NO MANDÓ FOTO
+  if (saysPaid && !hasImage) {
+    await sendWhatsApp(
+      waId,
+      "Listo 🙌 Para validar el pago, tenés que *adjuntar la foto del comprobante SINPE* aquí mismo 🧾📸\n\nEnviála en un solo mensaje por favor."
+    );
+    return;
   }
 
+  // 📸 SI MANDÓ FOTO DEL COMPROBANTE
+  if (hasImage) {
+    await sendWhatsApp(waId, "Recibido 🙌 Déjame verificar el comprobante.");
+    await notifyOwner(
+      `🧾 Comprobante SINPE recibido\n📱 ${waId}\n🔑 Ref: ${session.sinpe_reference}`,
+      imageId
+    );
+    return;
+  }
+}
+
+
+  /**
+   * FAQs rápidas
+   */
   const lower = norm(text);
 
   if (/\b(envio|entregan|delivery|envian)\b/.test(lower)) {
@@ -1402,9 +1868,13 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
+  // Saludo + catálogo + foto
   if (isGreeting(text) && String(text || "").length < 25) {
     const catalogMsg = getCatalogLinks();
-    const greeting = `${fraseNoRepetir("saludos", waId)}\n\n${catalogMsg ? catalogMsg + "\n\n" : ""}Mandáme una foto del producto que te interesa 📸`;
+    const greeting =
+      `${fraseNoRepetir("saludos", waId)}\n\n` +
+      `${catalogMsg ? catalogMsg + "\n\n" : ""}` +
+      `Mandáme una foto del producto que te interesa 📸`;
     await sendWhatsApp(waId, greeting);
     if (catalogMsg) session.catalog_sent = true;
     return;
@@ -1419,6 +1889,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     return;
   }
 
+  // IA fallback
   if (shouldUseAI(session, text, hasImage)) {
     const ai = await aiHandleMessage(text, session);
     if (ai?.reply) {
@@ -1429,6 +1900,7 @@ async function handleClientMessage(waId, text, hasImage, imageId) {
     }
   }
 
+  // Fallback final
   const catalogMsg = !session.catalog_sent ? getCatalogLinks() : "";
   const fallback = catalogMsg
     ? `${catalogMsg}\n\nMandáme una foto del producto 📸`
@@ -1556,6 +2028,12 @@ app.get("/status", (req, res) => {
         sessions: SESSIONS_PERSIST ? "✅" : "❌",
         stats: STATS_PERSIST ? "✅" : "❌",
       },
+      premium: {
+        confirm_owner: "✅ (SI/NO/EDITAR)",
+        abandoned_reminder: PRO_REMINDER ? `✅ (${ABANDONED_REMINDER_HOURS}h)` : "❌",
+        vip: vipSet.size,
+        blocked: blockedSet.size,
+      },
     },
   });
 });
@@ -1586,7 +2064,7 @@ app.get("/", (req, res) => {
   );
 });
 
-// Keep-alive para evitar sleep (logs)
+// Keep-alive
 setInterval(() => {
   console.log("⏰ Keep-alive");
 }, 5 * 60 * 1000);
@@ -1608,7 +2086,8 @@ app.listen(PORT, () => {
       `🔒 Seguridad: ${APP_SECRET ? "ON" : "OFF"} | 💾 Persistencia: S=${
         SESSIONS_PERSIST ? "ON" : "OFF"
       } | M=${STATS_PERSIST ? "ON" : "OFF"}\n` +
-      `🌐 Graph API: ${GRAPH_API_VERSION}\n`
+      `🌐 Graph API: ${GRAPH_API_VERSION}\n` +
+      `⭐ VIP: ${vipSet.size} | ⛔ Bloqueados: ${blockedSet.size} | ✅ Confirm: ON\n`
   );
 
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
@@ -1618,3 +2097,4 @@ app.listen(PORT, () => {
     console.log("⚠️ OWNER_PHONE parece corto. Recomendado: 506XXXXXXXX (sin +)");
   }
 });
+
