@@ -259,10 +259,12 @@ function getProfile(waId) {
   if (!profiles.has(id)) {
     profiles.set(id, {
       waId: id,
+      name: "",
       tags: [],
       note: "",
       blocked: false,
       vip: false,
+      purchases: 0,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -968,6 +970,13 @@ async function executeAction(clientWaId, actionType, data = {}) {
     clientSession.state = "PAGO_CONFIRMADO";
     removePendingQuote(clientWaId);
     account.metrics.sinpe_confirmed += 1;
+    
+    // Incrementar compras del contacto
+    const profile = getProfile(clientWaId);
+    profile.purchases = (profile.purchases || 0) + 1;
+    profile.updated_at = new Date().toISOString();
+    if (PROFILES_PERSIST) saveProfilesToDisk();
+    
     if (STATS_PERSIST) saveStatsToDisk();
 
     const deliveryMsg =
@@ -1465,6 +1474,7 @@ io.on("connection", (socket) => {
       socket.emit("init_data", {
         pending: Array.from(pendingQuotes.values()),
         history: chatHistory.slice(-50),
+        contacts: Array.from(profiles.values()),
         metrics: account.metrics,
         tokens: { total: tokensTotal(), remaining: tokensRemaining() },
       });
@@ -1511,6 +1521,46 @@ io.on("connection", (socket) => {
       tokens: { total: tokensTotal(), remaining: tokensRemaining() },
       sessions: { total: sessions.size, active: Array.from(sessions.values()).filter(s => s.state !== "CERRADO_TIMEOUT").length },
     });
+  });
+
+  // Obtener contactos
+  socket.on("get_contacts", () => {
+    socket.emit("contacts_list", {
+      contacts: Array.from(profiles.values())
+    });
+  });
+
+  // Actualizar contacto
+  socket.on("update_contact", (data) => {
+    const { waId, name, note, tags, vip, blocked } = data;
+    if (!waId) return;
+
+    const profile = getProfile(waId);
+    if (name !== undefined) profile.name = name;
+    if (note !== undefined) profile.note = note;
+    if (tags !== undefined) profile.tags = tags;
+    if (vip !== undefined) profile.vip = vip;
+    if (blocked !== undefined) profile.blocked = blocked;
+    profile.updated_at = new Date().toISOString();
+
+    // Actualizar sets de VIP y bloqueados
+    const normalized = normalizeCRPhone(waId);
+    if (vip) {
+      vipSet.add(normalized);
+    } else {
+      vipSet.delete(normalized);
+    }
+    if (blocked) {
+      blockedSet.add(normalized);
+    } else {
+      blockedSet.delete(normalized);
+    }
+
+    if (PROFILES_PERSIST) saveProfilesToDisk();
+
+    // Confirmar al panel
+    socket.emit("contact_updated", profile);
+    console.log(`👤 Contacto actualizado: ${waId} - ${name || "(sin nombre)"}`);
   });
   
   socket.on("disconnect", () => {
