@@ -351,12 +351,12 @@ function isBlocked(waId) {
  PERSISTENCIA SESIONES
  ============================
  */
-const SESSIONS_FILE = path.join(process.cwd(), "sessions.json");
-
 function loadSessionsFromDisk() {
   if (!SESSIONS_PERSIST) return;
+
   try {
     if (!fs.existsSync(SESSIONS_FILE)) return;
+
     const arr = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf-8"));
     if (Array.isArray(arr)) {
       for (const s of arr) {
@@ -365,13 +365,17 @@ function loadSessionsFromDisk() {
           s.reminder_timer = null;
           if (!Array.isArray(s.details_log)) s.details_log = [];
           if (!Array.isArray(s.message_history)) s.message_history = [];
-          sessions.set(s.waId, s);
+          sessions.set(String(s.waId), s);
         }
-      console.log(`📱 Sesiones cargadas: ${sessions.size}`);
+      }
     }
+
+    console.log(`🧾 Sesiones cargadas: ${sessions.size}`);
   } catch (e) {
     console.log("⚠️ Error cargando sesiones:", e?.message);
   }
+}
+
 
 function saveSessionsToDisk() {
   if (!SESSIONS_PERSIST) return;
