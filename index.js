@@ -2095,14 +2095,15 @@ setInterval(() => {
  ============================
  INICIAR SERVIDOR (AL FINAL)
  ============================
- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   loadProfilesFromDisk();
   loadSessionsFromDisk();
-  loadStatsToDisk?.(); // si no existe, no hace nada
-  loadStatsFromDisk?.(); // compat
-  loadStatsFromDisk && loadStatsFromDisk();
+
+  // Cargar stats (seguro)
+  if (typeof loadStatsFromDisk === "function") {
+    loadStatsFromDisk();
+  }
 
   console.log(`🚀 Servidor iniciado en puerto ${PORT}`);
   console.log(
@@ -2112,6 +2113,8 @@ app.listen(PORT, () => {
       `🌐 Graph API: ${GRAPH_API_VERSION}\n` +
       `⭐ VIP: ${vipSet.size} | ⛔ Bloqueados: ${blockedSet.size} | ✅ Confirm: ${REQUIRE_OWNER_CONFIRM ? "ON" : "OFF"}\n`
   );
+});
+
 
   if (!WHATSAPP_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
     console.log("⚠️ Modo SIM activo: faltan WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID");
