@@ -1501,15 +1501,29 @@ Respondé SOLO con JSON válido:
     if (!response.ok) return null;
 
     const data = await response.json();
-    const parsed = JSON.parse(data.choices[0].message.content);
+  const raw = String(data?.choices?.[0]?.message?.content || "").trim();
 
+// limpia ```json ``` o texto extraño
+const cleaned = raw
+  .replace(/```json/gi, "```")
+  .replace(/```/g, "")
+  .trim();
+
+try {
+  const parsed = JSON.parse(cleaned);
+
+  if (parsed && typeof parsed.reply === "string" && parsed.reply.trim()) {
     account.metrics.ai_calls += 1;
     if (STATS_PERSIST) saveStatsToDisk();
-    return parsed;
-  } catch {
-    return null;
+    return { reply: parsed.reply.trim() };
   }
+
+  return null;
+} catch (e) {
+  console.log("⚠️ Error parseando JSON IA:", cleaned.slice(0, 200));
+  return null;
 }
+
 /**
  ============================
  HANDLER CLIENTE (COMPLETO)
