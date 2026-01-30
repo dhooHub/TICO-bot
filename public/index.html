@@ -4,287 +4,1307 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#075E54">
-  <title>TICO-bot Panel</title>
+  <title>TICO-bot Panel Pro</title>
   <link rel="manifest" href="/manifest.json">
   <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    :root{--wa-green:#075E54;--wa-light:#25D366;--wa-bg:#ECE5DD;--wa-dark:#1F2C34;--danger:#E74C3C;--success:#27AE60}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--wa-bg);min-height:100vh}
-    #login{position:fixed;inset:0;background:linear-gradient(135deg,var(--wa-green),var(--wa-dark));display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:1000}
-    #login.hidden{display:none}
-    .logo{font-size:4rem;margin-bottom:1rem}
-    .title{color:#fff;font-size:1.5rem;margin-bottom:2rem}
-    .pin-box{display:flex;gap:.5rem;margin-bottom:1.5rem}
-    .pin-digit{width:50px;height:60px;font-size:1.5rem;text-align:center;border:2px solid rgba(255,255,255,.3);border-radius:12px;background:rgba(255,255,255,.1);color:#fff;outline:none}
-    .pin-digit:focus{border-color:var(--wa-light)}
-    .login-btn{background:var(--wa-light);color:#fff;border:none;padding:1rem 3rem;font-size:1.1rem;border-radius:25px;cursor:pointer}
-    .login-btn:disabled{opacity:.5}
-    .error{color:#FF6B6B;margin-top:1rem}
-    header{background:var(--wa-green);color:#fff;padding:1rem;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center}
-    .stats{display:flex;gap:1rem;font-size:.85rem}
-    .badge{background:rgba(255,255,255,.2);padding:.3rem .6rem;border-radius:12px}
-    .tabs{display:flex;background:#fff;border-bottom:1px solid #ddd;position:sticky;top:56px;z-index:99}
-    .tab{flex:1;padding:.8rem;text-align:center;border:none;background:none;font-size:.9rem;color:#666;cursor:pointer;border-bottom:3px solid transparent}
-    .tab.active{color:var(--wa-green);border-bottom-color:var(--wa-green);font-weight:600}
-    .tab-badge{background:var(--danger);color:#fff;font-size:.7rem;padding:.15rem .4rem;border-radius:10px;margin-left:.3rem}
-    .content{display:none;padding:1rem;padding-bottom:100px}
-    .content.active{display:block}
-    .card{background:#fff;border-radius:12px;padding:1rem;margin-bottom:1rem;box-shadow:0 2px 8px rgba(0,0,0,.1)}
-    .card-header{display:flex;justify-content:space-between;margin-bottom:.8rem}
-    .phone{font-weight:600;color:var(--wa-green)}
-    .time{font-size:.8rem;color:#999}
-    .details{background:var(--wa-bg);padding:.8rem;border-radius:8px;margin-bottom:1rem;font-size:.9rem}
-    .actions{display:grid;grid-template-columns:1fr 1fr;gap:.5rem}
-    .btn{padding:.8rem;border:none;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer}
-    .btn:active{transform:scale(.95)}
-    .btn-price{background:var(--wa-light);color:#fff;grid-column:span 2}
-    .btn-no{background:var(--danger);color:#fff}
-    .btn-cat{background:#34B7F1;color:#fff}
-    .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;z-index:200;opacity:0;visibility:hidden;transition:all .3s}
-    .modal-bg.active{opacity:1;visibility:visible}
-    .modal{background:#fff;width:100%;border-radius:20px 20px 0 0;padding:1.5rem;transform:translateY(100%);transition:transform .3s}
-    .modal-bg.active .modal{transform:translateY(0)}
-    .modal-title{font-size:1.2rem;font-weight:600;margin-bottom:1rem;text-align:center}
-    .modal-client{background:var(--wa-bg);padding:.8rem;border-radius:8px;margin-bottom:1rem;text-align:center}
-    .input-group{margin-bottom:1rem}
-    .input-group label{display:block;font-size:.85rem;color:#666;margin-bottom:.3rem}
-    .price-input{width:100%;padding:1rem;font-size:1.5rem;border:2px solid #ddd;border-radius:12px;text-align:center;outline:none}
-    .price-input:focus{border-color:var(--wa-green)}
-    .quick{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
-    .quick button{padding:.5rem 1rem;background:var(--wa-bg);border:none;border-radius:20px;cursor:pointer}
-    .modal-btns{display:flex;gap:.5rem}
-    .modal-btn{flex:1;padding:1rem;border:none;border-radius:12px;font-size:1rem;font-weight:600;cursor:pointer}
-    .modal-btn.cancel{background:#eee;color:#666}
-    .modal-btn.ok{background:var(--wa-light);color:#fff}
-    .metrics{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-    .metric{background:#fff;padding:1.2rem;border-radius:12px;text-align:center}
-    .metric-val{font-size:2rem;font-weight:700;color:var(--wa-green)}
-    .metric-label{font-size:.85rem;color:#666;margin-top:.3rem}
-    .metric.big{grid-column:span 2;background:linear-gradient(135deg,var(--wa-green),var(--wa-dark));color:#fff}
-    .metric.big .metric-val,.metric.big .metric-label{color:#fff}
-    .empty{text-align:center;padding:3rem 1rem;color:#999}
-    .empty-icon{font-size:4rem;margin-bottom:1rem}
-    .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%) translateY(100px);background:var(--wa-dark);color:#fff;padding:1rem 1.5rem;border-radius:12px;opacity:0;transition:all .3s;z-index:300}
-    .toast.show{transform:translateX(-50%) translateY(0);opacity:1}
-    .toast.ok{background:var(--success)}
-    .toast.err{background:var(--danger)}
+    :root {
+      --primary: #075E54;
+      --primary-light: #25D366;
+      --primary-dark: #054d44;
+      --accent: #34B7F1;
+      --bg: #ECE5DD;
+      --bg-dark: #0d1418;
+      --card: #ffffff;
+      --card-dark: #1f2c34;
+      --text: #111b21;
+      --text-dark: #e9edef;
+      --text-muted: #667781;
+      --danger: #E74C3C;
+      --success: #27AE60;
+      --warning: #F39C12;
+      --bubble-out: #d9fdd3;
+      --bubble-in: #ffffff;
+      --bubble-out-dark: #005c4b;
+      --bubble-in-dark: #1f2c34;
+    }
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      transition: background 0.3s, color 0.3s;
+    }
+    
+    body.dark {
+      --bg: var(--bg-dark);
+      --card: var(--card-dark);
+      --text: var(--text-dark);
+      --bubble-out: var(--bubble-out-dark);
+      --bubble-in: var(--bubble-in-dark);
+    }
+    
+    /* === LOGIN === */
+    #login {
+      position: fixed;
+      inset: 0;
+      background: linear-gradient(135deg, var(--primary) 0%, #1F2C34 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    #login.hidden { display: none; }
+    .login-logo { font-size: 5rem; margin-bottom: 0.5rem; animation: bounce 1s infinite; }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+    .login-title { color: #fff; font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .login-subtitle { color: rgba(255,255,255,0.7); font-size: 0.95rem; margin-bottom: 2rem; }
+    .pin-box { display: flex; gap: 0.75rem; margin-bottom: 1.5rem; }
+    .pin-digit {
+      width: 55px; height: 65px;
+      font-size: 1.8rem; text-align: center;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.1);
+      color: #fff; outline: none;
+      transition: all 0.2s;
+    }
+    .pin-digit:focus { border-color: var(--primary-light); background: rgba(255,255,255,0.2); transform: scale(1.05); }
+    .login-btn {
+      background: var(--primary-light);
+      color: #fff; border: none;
+      padding: 1rem 4rem;
+      font-size: 1.1rem; font-weight: 600;
+      border-radius: 30px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .login-btn:hover { transform: scale(1.05); }
+    .login-btn:disabled { opacity: 0.5; transform: none; }
+    .login-error { color: #FF6B6B; margin-top: 1rem; font-size: 0.9rem; }
+    
+    /* === HEADER === */
+    header {
+      background: var(--primary);
+      color: #fff;
+      padding: 0.8rem 1rem;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    .header-left { display: flex; align-items: center; gap: 0.5rem; }
+    .header-title { font-size: 1.2rem; font-weight: 700; }
+    .header-right { display: flex; align-items: center; gap: 0.75rem; }
+    .header-badge {
+      background: rgba(255,255,255,0.2);
+      padding: 0.4rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      transition: background 0.3s;
+    }
+    .status-dot.online { background: var(--primary-light); animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .dark-toggle {
+      background: rgba(255,255,255,0.2);
+      border: none;
+      padding: 0.5rem;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 1.1rem;
+      transition: transform 0.2s;
+    }
+    .dark-toggle:hover { transform: rotate(20deg); }
+    
+    /* === TABS === */
+    .tabs {
+      display: flex;
+      background: var(--card);
+      border-bottom: 1px solid rgba(0,0,0,0.1);
+      position: sticky;
+      top: 52px;
+      z-index: 99;
+    }
+    .tab {
+      flex: 1;
+      padding: 0.9rem 0.5rem;
+      text-align: center;
+      border: none;
+      background: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.3rem;
+    }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+    .tab-badge {
+      background: var(--danger);
+      color: #fff;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 10px;
+      font-weight: 700;
+      animation: pop 0.3s;
+    }
+    @keyframes pop {
+      0% { transform: scale(0); }
+      80% { transform: scale(1.2); }
+      100% { transform: scale(1); }
+    }
+    
+    /* === CONTENT === */
+    .content {
+      display: none;
+      padding: 1rem;
+      padding-bottom: 100px;
+      max-width: 600px;
+      margin: 0 auto;
+    }
+    .content.active { display: block; }
+    
+    /* === SEARCH === */
+    .search-box {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 0.8rem 1rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .search-box input {
+      flex: 1;
+      border: none;
+      background: none;
+      font-size: 1rem;
+      outline: none;
+      color: var(--text);
+    }
+    .search-box input::placeholder { color: var(--text-muted); }
+    
+    /* === CARDS === */
+    .card {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      transition: transform 0.2s, box-shadow 0.2s;
+      animation: slideIn 0.3s ease-out;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .card:active { transform: scale(0.98); }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.8rem;
+    }
+    .card-phone {
+      font-weight: 700;
+      color: var(--primary);
+      font-size: 1.05rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .card-time {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    .card-image {
+      width: 100%;
+      max-height: 200px;
+      object-fit: cover;
+      border-radius: 12px;
+      margin-bottom: 0.8rem;
+      background: var(--bg);
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .card-image:hover { transform: scale(1.02); }
+    .card-details {
+      background: var(--bg);
+      padding: 0.8rem 1rem;
+      border-radius: 12px;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+      color: var(--text);
+      border-left: 4px solid var(--primary-light);
+    }
+    .card-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.6rem;
+    }
+    
+    /* === BUTTONS === */
+    .btn {
+      padding: 0.9rem 1rem;
+      border: none;
+      border-radius: 12px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+    }
+    .btn:active { transform: scale(0.95); }
+    .btn-primary { background: var(--primary-light); color: #fff; grid-column: span 2; }
+    .btn-primary:hover { background: var(--primary); }
+    .btn-danger { background: var(--danger); color: #fff; }
+    .btn-danger:hover { background: #c0392b; }
+    .btn-info { background: var(--accent); color: #fff; }
+    .btn-info:hover { background: #2196F3; }
+    .btn-secondary { background: var(--bg); color: var(--text); }
+    .btn-sm { padding: 0.6rem 0.8rem; font-size: 0.8rem; }
+    
+    /* === MODAL === */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      z-index: 200;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s;
+      backdrop-filter: blur(4px);
+    }
+    .modal-overlay.active { opacity: 1; visibility: visible; }
+    .modal {
+      background: var(--card);
+      width: 100%;
+      max-width: 500px;
+      border-radius: 24px 24px 0 0;
+      padding: 1.5rem;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-overlay.active .modal { transform: translateY(0); }
+    .modal-handle {
+      width: 40px; height: 5px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 5px;
+      margin: 0 auto 1rem;
+    }
+    .modal-title {
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+    .modal-client {
+      background: var(--bg);
+      padding: 0.8rem 1rem;
+      border-radius: 12px;
+      margin-bottom: 1rem;
+      text-align: center;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    .input-group { margin-bottom: 1rem; }
+    .input-group label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+    .price-input {
+      width: 100%;
+      padding: 1rem;
+      font-size: 1.8rem;
+      font-weight: 700;
+      border: 2px solid var(--bg);
+      border-radius: 16px;
+      text-align: center;
+      outline: none;
+      background: var(--card);
+      color: var(--text);
+      transition: border-color 0.2s;
+    }
+    .price-input:focus { border-color: var(--primary-light); }
+    .price-input::placeholder { color: var(--text-muted); font-weight: 400; }
+    .quick-prices {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .quick-price {
+      padding: 0.7rem;
+      background: var(--bg);
+      border: 2px solid transparent;
+      border-radius: 12px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      color: var(--text);
+    }
+    .quick-price:hover { border-color: var(--primary-light); background: rgba(37, 211, 102, 0.1); }
+    .quick-price.selected { background: var(--primary-light); color: #fff; }
+    .modal-actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+    .modal-actions .btn { flex: 1; padding: 1rem; }
+    
+    /* === CHAT VIEW === */
+    .chat-view {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      z-index: 150;
+      display: none;
+      flex-direction: column;
+    }
+    .chat-view.active { display: flex; }
+    .chat-header {
+      background: var(--primary);
+      color: #fff;
+      padding: 0.8rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .chat-back {
+      background: none;
+      border: none;
+      color: #fff;
+      font-size: 1.5rem;
+      cursor: pointer;
+      padding: 0.5rem;
+    }
+    .chat-info { flex: 1; }
+    .chat-name { font-weight: 700; font-size: 1.1rem; }
+    .chat-status { font-size: 0.8rem; opacity: 0.8; }
+    .chat-messages {
+      flex: 1;
+      padding: 1rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .message {
+      max-width: 80%;
+      padding: 0.8rem 1rem;
+      border-radius: 16px;
+      font-size: 0.95rem;
+      position: relative;
+      animation: msgIn 0.2s ease-out;
+    }
+    @keyframes msgIn {
+      from { opacity: 0; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .message.in {
+      background: var(--bubble-in);
+      align-self: flex-start;
+      border-bottom-left-radius: 4px;
+    }
+    .message.out {
+      background: var(--bubble-out);
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+    .message-time {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-align: right;
+      margin-top: 0.3rem;
+    }
+    .message-image {
+      max-width: 100%;
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+    }
+    .chat-input-area {
+      background: var(--card);
+      padding: 0.8rem;
+      display: flex;
+      gap: 0.5rem;
+      border-top: 1px solid var(--bg);
+    }
+    .chat-input {
+      flex: 1;
+      padding: 0.8rem 1rem;
+      border: none;
+      border-radius: 25px;
+      background: var(--bg);
+      font-size: 1rem;
+      outline: none;
+      color: var(--text);
+    }
+    .chat-send {
+      width: 48px;
+      height: 48px;
+      background: var(--primary-light);
+      border: none;
+      border-radius: 50%;
+      color: #fff;
+      font-size: 1.3rem;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .chat-send:hover { transform: scale(1.1); }
+    
+    /* === METRICS === */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+    }
+    .metric-card {
+      background: var(--card);
+      padding: 1.5rem;
+      border-radius: 16px;
+      text-align: center;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+    .metric-icon { font-size: 2rem; margin-bottom: 0.5rem; }
+    .metric-value {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: var(--primary);
+      line-height: 1;
+    }
+    .metric-label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.3rem;
+    }
+    .metric-card.featured {
+      grid-column: span 2;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+      color: #fff;
+    }
+    .metric-card.featured .metric-value,
+    .metric-card.featured .metric-label { color: #fff; }
+    
+    /* === SETTINGS === */
+    .settings-section {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .settings-title {
+      font-weight: 700;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .setting-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.8rem 0;
+      border-bottom: 1px solid var(--bg);
+    }
+    .setting-item:last-child { border-bottom: none; }
+    .setting-label { font-size: 0.95rem; }
+    .toggle {
+      width: 50px;
+      height: 28px;
+      background: var(--bg);
+      border-radius: 14px;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+    .toggle.active { background: var(--primary-light); }
+    .toggle::after {
+      content: '';
+      position: absolute;
+      width: 24px;
+      height: 24px;
+      background: #fff;
+      border-radius: 50%;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.3s;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .toggle.active::after { transform: translateX(22px); }
+    
+    /* === EMPTY STATE === */
+    .empty-state {
+      text-align: center;
+      padding: 4rem 2rem;
+      color: var(--text-muted);
+    }
+    .empty-icon { font-size: 5rem; margin-bottom: 1rem; opacity: 0.5; }
+    .empty-title { font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--text); }
+    .empty-text { font-size: 0.95rem; }
+    
+    /* === TOAST === */
+    .toast {
+      position: fixed;
+      bottom: 90px;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--card);
+      color: var(--text);
+      padding: 1rem 1.5rem;
+      border-radius: 16px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 300;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+    .toast.success { background: var(--success); color: #fff; }
+    .toast.error { background: var(--danger); color: #fff; }
+    .toast.warning { background: var(--warning); color: #fff; }
+    
+    /* === IMAGE VIEWER === */
+    .image-viewer {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.95);
+      z-index: 250;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .image-viewer.active { display: flex; }
+    .image-viewer img {
+      max-width: 100%;
+      max-height: 90vh;
+      object-fit: contain;
+      border-radius: 8px;
+    }
+    .image-viewer-close {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      background: rgba(255,255,255,0.2);
+      border: none;
+      color: #fff;
+      font-size: 2rem;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+    
+    /* === RESPONSIVE === */
+    @media (min-width: 768px) {
+      .content { padding: 1.5rem; }
+      .modal { border-radius: 24px; margin: 2rem; }
+    }
   </style>
 </head>
 <body>
+  <!-- LOGIN -->
   <div id="login">
-    <div class="logo">🤖</div>
-    <h1 class="title">TICO-bot Panel</h1>
+    <div class="login-logo">🤖</div>
+    <h1 class="login-title">TICO-bot</h1>
+    <p class="login-subtitle">Panel de Control Pro</p>
     <div class="pin-box">
-      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric">
-      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric">
-      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric">
-      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric">
+      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
+      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
+      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
+      <input type="tel" class="pin-digit" maxlength="1" inputmode="numeric" autocomplete="off">
     </div>
     <button class="login-btn" id="loginBtn" disabled>Entrar</button>
-    <p class="error" id="loginErr"></p>
+    <p class="login-error" id="loginError"></p>
   </div>
 
-  <div id="app" style="display:none">
+  <!-- APP -->
+  <div id="app" style="display:none;">
     <header>
-      <div id="storeName">TICO-bot</div>
-      <div class="stats">
-        <span class="badge">🎟️ <span id="tokens">0</span></span>
-        <span class="badge" id="status">🔴</span>
+      <div class="header-left">
+        <span class="header-title" id="storeName">🏪 Mi Tienda</span>
+      </div>
+      <div class="header-right">
+        <div class="header-badge">
+          <span>🎟️</span>
+          <span id="tokensDisplay">0</span>
+        </div>
+        <div class="status-dot" id="statusDot"></div>
+        <button class="dark-toggle" id="darkToggle">🌙</button>
       </div>
     </header>
+
     <div class="tabs">
-      <button class="tab active" data-tab="pending">📥 Pendientes <span class="tab-badge" id="pendingBadge" style="display:none">0</span></button>
+      <button class="tab active" data-tab="pending">
+        📥 Pendientes
+        <span class="tab-badge" id="pendingBadge" style="display:none;">0</span>
+      </button>
+      <button class="tab" data-tab="chats">💬 Chats</button>
       <button class="tab" data-tab="metrics">📊 Métricas</button>
+      <button class="tab" data-tab="settings">⚙️</button>
     </div>
+
+    <!-- PENDIENTES -->
     <div class="content active" id="tab-pending">
+      <div class="search-box">
+        <span>🔍</span>
+        <input type="text" placeholder="Buscar cliente..." id="searchPending">
+      </div>
       <div id="pendingList"></div>
-      <div class="empty" id="emptyPending"><div class="empty-icon">✅</div><p>¡No hay pendientes!</p></div>
+      <div class="empty-state" id="emptyPending" style="display:none;">
+        <div class="empty-icon">✅</div>
+        <div class="empty-title">¡Todo al día!</div>
+        <div class="empty-text">No hay consultas pendientes</div>
+      </div>
     </div>
+
+    <!-- CHATS -->
+    <div class="content" id="tab-chats">
+      <div class="search-box">
+        <span>🔍</span>
+        <input type="text" placeholder="Buscar conversación..." id="searchChats">
+      </div>
+      <div id="chatList"></div>
+      <div class="empty-state" id="emptyChats" style="display:none;">
+        <div class="empty-icon">💬</div>
+        <div class="empty-title">Sin conversaciones</div>
+        <div class="empty-text">Los chats aparecerán aquí</div>
+      </div>
+    </div>
+
+    <!-- METRICS -->
     <div class="content" id="tab-metrics">
-      <div class="metrics">
-        <div class="metric big"><div class="metric-val" id="mTokens">0/0</div><div class="metric-label">Fichas</div></div>
-        <div class="metric"><div class="metric-val" id="mChats">0</div><div class="metric-label">Chats</div></div>
-        <div class="metric"><div class="metric-val" id="mQuotes">0</div><div class="metric-label">Cotizaciones</div></div>
-        <div class="metric"><div class="metric-val" id="mSales">0</div><div class="metric-label">Ventas</div></div>
-        <div class="metric"><div class="metric-val" id="mYes">0</div><div class="metric-label">Dijeron SÍ</div></div>
+      <div class="metrics-grid">
+        <div class="metric-card featured">
+          <div class="metric-icon">🎟️</div>
+          <div class="metric-value" id="mTokens">0/0</div>
+          <div class="metric-label">Fichas disponibles</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">💬</div>
+          <div class="metric-value" id="mChats">0</div>
+          <div class="metric-label">Chats totales</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">📋</div>
+          <div class="metric-value" id="mQuotes">0</div>
+          <div class="metric-label">Cotizaciones</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">✅</div>
+          <div class="metric-value" id="mSales">0</div>
+          <div class="metric-label">Ventas</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">👍</div>
+          <div class="metric-value" id="mYes">0</div>
+          <div class="metric-label">Dijeron SÍ</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">👎</div>
+          <div class="metric-value" id="mNo">0</div>
+          <div class="metric-label">Dijeron NO</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">📦</div>
+          <div class="metric-value" id="mEnvio">0</div>
+          <div class="metric-label">Envíos</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon">🏪</div>
+          <div class="metric-value" id="mRecoger">0</div>
+          <div class="metric-label">Retiros</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="content" id="tab-settings">
+      <div class="settings-section">
+        <div class="settings-title">🔔 Notificaciones</div>
+        <div class="setting-item">
+          <span class="setting-label">Sonido</span>
+          <div class="toggle active" id="toggleSound"></div>
+        </div>
+        <div class="setting-item">
+          <span class="setting-label">Vibración</span>
+          <div class="toggle active" id="toggleVibrate"></div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">💰 Precios rápidos</div>
+        <div id="quickPricesList"></div>
+        <button class="btn btn-secondary btn-sm" style="width:100%;margin-top:0.5rem;" id="addQuickPrice">
+          ➕ Agregar precio
+        </button>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">🎨 Apariencia</div>
+        <div class="setting-item">
+          <span class="setting-label">Modo oscuro</span>
+          <div class="toggle" id="toggleDark"></div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">ℹ️ Info</div>
+        <div class="setting-item">
+          <span class="setting-label">Versión</span>
+          <span style="color:var(--text-muted)">2.0 Pro</span>
+        </div>
       </div>
     </div>
   </div>
 
-  <div class="modal-bg" id="priceModal">
+  <!-- MODAL PRECIO -->
+  <div class="modal-overlay" id="priceModal">
     <div class="modal">
+      <div class="modal-handle"></div>
       <div class="modal-title">💰 Enviar Precio</div>
-      <div class="modal-client" id="modalClient">506XXXXXXXX</div>
+      <div class="modal-client" id="modalClient">506 0000-0000</div>
       <div class="input-group">
-        <label>Precio (₡)</label>
-        <input type="number" class="price-input" id="inputPrice" placeholder="0" inputmode="numeric">
+        <label>Precio del producto</label>
+        <input type="number" class="price-input" id="inputPrice" placeholder="₡0" inputmode="numeric">
       </div>
+      <div class="quick-prices" id="quickPricesGrid"></div>
       <div class="input-group">
-        <label>Envío (₡)</label>
-        <input type="number" class="price-input" id="inputShip" placeholder="0" inputmode="numeric" style="font-size:1.2rem">
+        <label>Costo de envío (opcional)</label>
+        <input type="number" class="price-input" id="inputShipping" placeholder="₡0" inputmode="numeric" style="font-size:1.3rem;">
       </div>
-      <div class="quick">
-        <button data-p="5000">₡5,000</button>
-        <button data-p="7500">₡7,500</button>
-        <button data-p="10000">₡10,000</button>
-        <button data-p="15000">₡15,000</button>
-      </div>
-      <div class="modal-btns">
-        <button class="modal-btn cancel" id="modalCancel">Cancelar</button>
-        <button class="modal-btn ok" id="modalOk">Enviar ✓</button>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" id="modalCancel">Cancelar</button>
+        <button class="btn btn-primary" id="modalSend">Enviar ✓</button>
       </div>
     </div>
   </div>
 
+  <!-- CHAT VIEW -->
+  <div class="chat-view" id="chatView">
+    <div class="chat-header">
+      <button class="chat-back" id="chatBack">←</button>
+      <div class="chat-info">
+        <div class="chat-name" id="chatName">Cliente</div>
+        <div class="chat-status" id="chatStatus">En línea</div>
+      </div>
+    </div>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input-area">
+      <input type="text" class="chat-input" id="chatInput" placeholder="Escribe un mensaje...">
+      <button class="chat-send" id="chatSend">➤</button>
+    </div>
+  </div>
+
+  <!-- IMAGE VIEWER -->
+  <div class="image-viewer" id="imageViewer">
+    <button class="image-viewer-close" id="imageViewerClose">✕</button>
+    <img src="" alt="Imagen" id="imageViewerImg">
+  </div>
+
+  <!-- TOAST -->
   <div class="toast" id="toast"></div>
+
+  <!-- AUDIO -->
+  <audio id="notifSound" preload="auto">
+    <source src="data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA/+M4wAAAAAAAAAAAAEluZm8AAAAPAAAAAwAAAbAAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV////////////////////////////////////////////AAAAAExhdmM1OC4xMwAAAAAAAAAAAAAAACQDgAAAAAAAAAGw4RNjYQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/+MYxAALACwAAP/AACN4DhMwYPGDABAEAweFBACAIAgCAYOD5cHy4Pl/Lh/5cPh8==" type="audio/mpeg">
+  </audio>
 
   <script src="/socket.io/socket.io.js"></script>
   <script>
-    let socket,pending=[],current=null;
-    const $=id=>document.getElementById(id);
-    const pins=document.querySelectorAll('.pin-digit');
-
-    pins.forEach((p,i)=>{
-      p.addEventListener('input',e=>{if(e.target.value&&i<3)pins[i+1].focus();checkPin()});
-      p.addEventListener('keydown',e=>{if(e.key==='Backspace'&&!e.target.value&&i>0)pins[i-1].focus()});
-    });
-
-    function getPin(){return Array.from(pins).map(p=>p.value).join('')}
-    function checkPin(){$('loginBtn').disabled=getPin().length!==4}
-
-    $('loginBtn').onclick=()=>{
-      socket=io();
-      socket.on('connect',()=>socket.emit('auth',getPin()));
-      socket.on('auth_success',d=>{
-        $('login').classList.add('hidden');
-        $('app').style.display='block';
-        $('storeName').textContent=d.storeName||'TICO-bot';
-        $('status').textContent='🟢';
-        toast('¡Conectado! 🙌','ok');
-      });
-      socket.on('auth_error',m=>{$('loginErr').textContent=m;pins.forEach(p=>p.value='');pins[0].focus()});
-      socket.on('init_data',d=>{
-        pending=d.pending||[];
-        updateTokens(d.tokens);
-        updateMetrics(d.metrics);
-        render();
-      });
-      socket.on('new_pending',q=>{pending.push(q);render();playSound();toast('📥 Nueva consulta!','ok')});
-      socket.on('pending_resolved',d=>{pending=pending.filter(p=>p.waId!==d.waId);render()});
-      socket.on('action_result',r=>{r.success?toast('✅ '+r.message,'ok'):toast('❌ '+r.message,'err');closeModal()});
-      socket.on('disconnect',()=>$('status').textContent='🔴');
-      socket.on('metrics',d=>{updateTokens(d.tokens);updateMetrics(d.metrics)});
+    // === STATE ===
+    let socket;
+    let pending = [];
+    let chats = {};
+    let currentClient = null;
+    let currentChat = null;
+    let settings = {
+      sound: true,
+      vibrate: true,
+      dark: false,
+      quickPrices: [5000, 7500, 10000, 15000, 20000, 25000, 30000, 50000]
     };
 
-    document.querySelectorAll('.tab').forEach(t=>{
-      t.onclick=()=>{
-        document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-        document.querySelectorAll('.content').forEach(x=>x.classList.remove('active'));
-        t.classList.add('active');
-        $('tab-'+t.dataset.tab).classList.add('active');
-        if(t.dataset.tab==='metrics')socket.emit('get_metrics');
+    // === HELPERS ===
+    const $ = id => document.getElementById(id);
+    const $$ = sel => document.querySelectorAll(sel);
+    
+    function loadSettings() {
+      const saved = localStorage.getItem('ticobot_settings');
+      if (saved) settings = { ...settings, ...JSON.parse(saved) };
+      applySettings();
+    }
+    
+    function saveSettings() {
+      localStorage.setItem('ticobot_settings', JSON.stringify(settings));
+    }
+    
+    function applySettings() {
+      if (settings.dark) document.body.classList.add('dark');
+      else document.body.classList.remove('dark');
+      $('toggleSound').classList.toggle('active', settings.sound);
+      $('toggleVibrate').classList.toggle('active', settings.vibrate);
+      $('toggleDark').classList.toggle('active', settings.dark);
+      $('darkToggle').textContent = settings.dark ? '☀️' : '🌙';
+      renderQuickPrices();
+    }
+
+    function formatPhone(waId) {
+      if (!waId) return '';
+      const d = String(waId).replace(/\D/g, '');
+      if (d.length === 11 && d.startsWith('506')) {
+        return `${d.slice(0,3)} ${d.slice(3,7)}-${d.slice(7)}`;
+      }
+      return waId;
+    }
+
+    function timeAgo(date) {
+      if (!date) return '';
+      const diff = Math.floor((Date.now() - new Date(date)) / 1000);
+      if (diff < 60) return 'ahora';
+      if (diff < 3600) return Math.floor(diff / 60) + 'm';
+      if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+      return Math.floor(diff / 86400) + 'd';
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return String(text).replace(/[&<>"']/g, m => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[m]));
+    }
+
+    function toast(message, type = '') {
+      const t = $('toast');
+      t.innerHTML = message;
+      t.className = 'toast show ' + type;
+      setTimeout(() => t.classList.remove('show'), 3500);
+    }
+
+    function playNotification() {
+      if (settings.sound) {
+        try { $('notifSound').play().catch(() => {}); } catch(e) {}
+      }
+      if (settings.vibrate && navigator.vibrate) {
+        navigator.vibrate([200, 100, 200]);
+      }
+    }
+
+    // === LOGIN ===
+    const pins = $$('.pin-digit');
+    pins.forEach((p, i) => {
+      p.addEventListener('input', e => {
+        if (e.target.value && i < 3) pins[i + 1].focus();
+        $('loginBtn').disabled = getPin().length !== 4;
+      });
+      p.addEventListener('keydown', e => {
+        if (e.key === 'Backspace' && !e.target.value && i > 0) pins[i - 1].focus();
+      });
+    });
+
+    function getPin() {
+      return Array.from(pins).map(p => p.value).join('');
+    }
+
+    $('loginBtn').onclick = () => {
+      socket = io();
+      
+      socket.on('connect', () => {
+        socket.emit('auth', getPin());
+      });
+
+      socket.on('auth_success', data => {
+        $('login').classList.add('hidden');
+        $('app').style.display = 'block';
+        $('storeName').textContent = '🏪 ' + (data.storeName || 'Mi Tienda');
+        $('statusDot').classList.add('online');
+        toast('✅ ¡Conectado!', 'success');
+      });
+
+      socket.on('auth_error', msg => {
+        $('loginError').textContent = msg;
+        pins.forEach(p => p.value = '');
+        pins[0].focus();
+      });
+
+      socket.on('init_data', data => {
+        pending = data.pending || [];
+        if (data.history) {
+          data.history.forEach(m => {
+            if (!chats[m.waId]) chats[m.waId] = [];
+            chats[m.waId].push(m);
+          });
+        }
+        updateTokens(data.tokens);
+        updateMetrics(data.metrics);
+        renderPending();
+        renderChatList();
+      });
+
+      socket.on('new_pending', item => {
+        pending.unshift(item);
+        renderPending();
+        playNotification();
+        toast('📥 Nueva consulta de ' + formatPhone(item.waId), 'success');
+      });
+
+      socket.on('pending_resolved', data => {
+        pending = pending.filter(p => p.waId !== data.waId);
+        renderPending();
+      });
+
+      socket.on('new_message', msg => {
+        if (!chats[msg.waId]) chats[msg.waId] = [];
+        chats[msg.waId].push(msg);
+        renderChatList();
+        if (currentChat === msg.waId) renderChatMessages();
+        if (msg.direction === 'in') {
+          playNotification();
+        }
+      });
+
+      socket.on('action_result', result => {
+        if (result.success) {
+          toast('✅ ' + result.message, 'success');
+          closeModal();
+        } else {
+          toast('❌ ' + result.message, 'error');
+        }
+      });
+
+      socket.on('metrics', data => {
+        updateTokens(data.tokens);
+        updateMetrics(data.metrics);
+      });
+
+      socket.on('disconnect', () => {
+        $('statusDot').classList.remove('online');
+        toast('🔴 Desconectado', 'error');
+      });
+    };
+
+    // === TABS ===
+    $$('.tab').forEach(tab => {
+      tab.onclick = () => {
+        $$('.tab').forEach(t => t.classList.remove('active'));
+        $$('.content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        $('tab-' + tab.dataset.tab).classList.add('active');
+        if (tab.dataset.tab === 'metrics') socket.emit('get_metrics');
       };
     });
 
-    function render(){
-      if(pending.length===0){
-        $('pendingList').innerHTML='';
-        $('emptyPending').style.display='block';
-        $('pendingBadge').style.display='none';
-      }else{
-        $('emptyPending').style.display='none';
-        $('pendingBadge').style.display='inline';
-        $('pendingBadge').textContent=pending.length;
-        $('pendingList').innerHTML=pending.map(p=>`
+    // === RENDER PENDING ===
+    function renderPending() {
+      const search = $('searchPending').value.toLowerCase();
+      const filtered = pending.filter(p => 
+        !search || p.waId.includes(search) || (p.details || '').toLowerCase().includes(search)
+      );
+
+      if (filtered.length === 0) {
+        $('pendingList').innerHTML = '';
+        $('emptyPending').style.display = 'block';
+        $('pendingBadge').style.display = 'none';
+      } else {
+        $('emptyPending').style.display = 'none';
+        $('pendingBadge').style.display = 'inline';
+        $('pendingBadge').textContent = pending.length;
+        
+        $('pendingList').innerHTML = filtered.map(p => `
           <div class="card">
             <div class="card-header">
-              <span class="phone">📱 ${fmtPhone(p.waId)}</span>
-              <span class="time">${timeAgo(p.created_at)}</span>
+              <span class="card-phone">📱 ${formatPhone(p.waId)}</span>
+              <span class="card-time">🕐 ${timeAgo(p.created_at)}</span>
             </div>
-            <div class="details">📝 ${esc(p.details)}</div>
-            <div class="actions">
-              <button class="btn btn-price" onclick="openPrice('${p.waId}')">💰 Dar Precio</button>
-              <button class="btn btn-no" onclick="send('${p.waId}','NO_HAY')">❌ No Hay</button>
-              <button class="btn btn-cat" onclick="send('${p.waId}','CATALOGO')">📋 Catálogo</button>
+            ${p.imageId ? `<img class="card-image" src="/api/image/${p.imageId}" onclick="viewImage(this.src)" onerror="this.style.display='none'">` : ''}
+            <div class="card-details">${escapeHtml(p.details) || '(Sin detalles)'}</div>
+            <div class="card-actions">
+              <button class="btn btn-primary" onclick="openPriceModal('${p.waId}')">💰 Dar Precio</button>
+              <button class="btn btn-danger" onclick="sendAction('${p.waId}', 'NO_HAY')">❌ No Hay</button>
+              <button class="btn btn-info" onclick="sendAction('${p.waId}', 'CATALOGO')">📋 Catálogo</button>
+              <button class="btn btn-secondary" onclick="openChat('${p.waId}')">💬 Chat</button>
             </div>
           </div>
         `).join('');
       }
     }
 
-    function openPrice(waId){
-      current=waId;
-      $('modalClient').textContent=fmtPhone(waId);
-      $('inputPrice').value='';
-      $('inputShip').value='';
-      $('priceModal').classList.add('active');
-      $('inputPrice').focus();
+    // === RENDER CHAT LIST ===
+    function renderChatList() {
+      const search = $('searchChats').value.toLowerCase();
+      const clientIds = Object.keys(chats).filter(waId => {
+        if (!search) return true;
+        return waId.includes(search) || chats[waId].some(m => (m.text || '').toLowerCase().includes(search));
+      });
+
+      // Sort by last message
+      clientIds.sort((a, b) => {
+        const lastA = chats[a][chats[a].length - 1];
+        const lastB = chats[b][chats[b].length - 1];
+        return new Date(lastB?.timestamp || 0) - new Date(lastA?.timestamp || 0);
+      });
+
+      if (clientIds.length === 0) {
+        $('chatList').innerHTML = '';
+        $('emptyChats').style.display = 'block';
+      } else {
+        $('emptyChats').style.display = 'none';
+        $('chatList').innerHTML = clientIds.slice(0, 50).map(waId => {
+          const msgs = chats[waId];
+          const last = msgs[msgs.length - 1];
+          const unread = msgs.filter(m => m.direction === 'in' && !m.read).length;
+          return `
+            <div class="card" onclick="openChat('${waId}')" style="cursor:pointer;">
+              <div class="card-header">
+                <span class="card-phone">📱 ${formatPhone(waId)}</span>
+                <span class="card-time">${timeAgo(last?.timestamp)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:var(--text-muted);font-size:0.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">
+                  ${last?.direction === 'out' ? '✓ ' : ''}${escapeHtml((last?.text || '').slice(0, 50))}
+                </span>
+                ${unread ? `<span class="tab-badge">${unread}</span>` : ''}
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
     }
 
-    function closeModal(){$('priceModal').classList.remove('active');current=null}
+    // === CHAT VIEW ===
+    function openChat(waId) {
+      currentChat = waId;
+      $('chatName').textContent = formatPhone(waId);
+      $('chatView').classList.add('active');
+      renderChatMessages();
+      // Mark as read
+      if (chats[waId]) chats[waId].forEach(m => m.read = true);
+      renderChatList();
+    }
 
-    $('modalCancel').onclick=closeModal;
-    $('priceModal').onclick=e=>{if(e.target===$('priceModal'))closeModal()};
+    function renderChatMessages() {
+      if (!currentChat || !chats[currentChat]) {
+        $('chatMessages').innerHTML = '<div class="empty-state"><div class="empty-icon">💬</div><div class="empty-text">No hay mensajes</div></div>';
+        return;
+      }
+      $('chatMessages').innerHTML = chats[currentChat].map(m => `
+        <div class="message ${m.direction}">
+          ${m.imageId ? `<img class="message-image" src="/api/image/${m.imageId}" onclick="viewImage(this.src)">` : ''}
+          <div>${escapeHtml(m.text)}</div>
+          <div class="message-time">${new Date(m.timestamp).toLocaleTimeString('es-CR', {hour: '2-digit', minute: '2-digit'})}</div>
+        </div>
+      `).join('');
+      $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+    }
 
-    $('modalOk').onclick=()=>{
-      const price=parseInt($('inputPrice').value)||0;
-      const ship=parseInt($('inputShip').value)||0;
-      if(price<100){toast('⚠️ Precio inválido','err');return}
-      send(current,'PRECIO',{price,shipping:ship});
+    $('chatBack').onclick = () => {
+      $('chatView').classList.remove('active');
+      currentChat = null;
     };
 
-    document.querySelectorAll('.quick button').forEach(b=>{
-      b.onclick=()=>$('inputPrice').value=b.dataset.p;
-    });
+    $('chatSend').onclick = () => {
+      const text = $('chatInput').value.trim();
+      if (!text || !currentChat) return;
+      socket.emit('action', {
+        clientWaId: currentChat,
+        actionType: 'MENSAJE_LIBRE',
+        payload: { texto: text }
+      });
+      $('chatInput').value = '';
+    };
 
-    function send(waId,type,payload={}){
-      socket.emit('action',{clientWaId:waId,actionType:type,payload});
+    $('chatInput').onkeypress = e => {
+      if (e.key === 'Enter') $('chatSend').click();
+    };
+
+    // === PRICE MODAL ===
+    function openPriceModal(waId) {
+      currentClient = waId;
+      $('modalClient').textContent = formatPhone(waId);
+      $('inputPrice').value = '';
+      $('inputShipping').value = '';
+      $('priceModal').classList.add('active');
+      renderQuickPricesGrid();
+      setTimeout(() => $('inputPrice').focus(), 300);
     }
 
-    function updateTokens(t){
-      if(!t)return;
-      $('tokens').textContent=t.remaining;
-      $('mTokens').textContent=t.remaining+'/'+t.total;
+    function closeModal() {
+      $('priceModal').classList.remove('active');
+      currentClient = null;
     }
 
-    function updateMetrics(m){
-      if(!m)return;
-      $('mChats').textContent=m.chats_total||0;
-      $('mQuotes').textContent=m.quotes_sent||0;
-      $('mSales').textContent=m.sinpe_confirmed||0;
-      $('mYes').textContent=m.intent_yes||0;
+    function renderQuickPricesGrid() {
+      $('quickPricesGrid').innerHTML = settings.quickPrices.map(p => `
+        <button class="quick-price" onclick="selectQuickPrice(${p}, this)">₡${p.toLocaleString()}</button>
+      `).join('');
     }
 
-    function fmtPhone(w){
-      if(!w)return'';
-      const d=w.replace(/\D/g,'');
-      return d.length===11&&d.startsWith('506')?d.slice(3,7)+'-'+d.slice(7):w;
+    function selectQuickPrice(price, btn) {
+      $('inputPrice').value = price;
+      $$('.quick-price').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
     }
 
-    function timeAgo(d){
-      if(!d)return'';
-      const diff=Math.floor((Date.now()-new Date(d))/1000);
-      if(diff<60)return'ahora';
-      if(diff<3600)return Math.floor(diff/60)+'m';
-      if(diff<86400)return Math.floor(diff/3600)+'h';
-      return Math.floor(diff/86400)+'d';
+    $('modalCancel').onclick = closeModal;
+    $('priceModal').onclick = e => { if (e.target === $('priceModal')) closeModal(); };
+
+    $('modalSend').onclick = () => {
+      const price = parseInt($('inputPrice').value) || 0;
+      const shipping = parseInt($('inputShipping').value) || 0;
+      if (price < 100) {
+        toast('⚠️ Ingresá un precio válido', 'warning');
+        return;
+      }
+      socket.emit('action', {
+        clientWaId: currentClient,
+        actionType: 'PRECIO',
+        payload: { price, shipping }
+      });
+    };
+
+    function sendAction(waId, type) {
+      const messages = {
+        'NO_HAY': '¿Confirmar "No hay stock"?',
+        'CATALOGO': '¿Enviar catálogo?'
+      };
+      if (confirm(messages[type] || '¿Confirmar?')) {
+        socket.emit('action', { clientWaId: waId, actionType: type });
+      }
     }
 
-    function esc(s){return s?String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])):''}
-
-    function toast(msg,type=''){
-      const t=$('toast');
-      t.textContent=msg;
-      t.className='toast show '+(type||'');
-      setTimeout(()=>t.classList.remove('show'),3000);
+    // === IMAGE VIEWER ===
+    function viewImage(src) {
+      $('imageViewerImg').src = src;
+      $('imageViewer').classList.add('active');
     }
 
-    function playSound(){
-      try{new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1f').play().catch(()=>{})}catch(e){}
+    $('imageViewerClose').onclick = () => $('imageViewer').classList.remove('active');
+    $('imageViewer').onclick = e => { if (e.target === $('imageViewer')) $('imageViewer').classList.remove('active'); };
+
+    // === METRICS ===
+    function updateTokens(tokens) {
+      if (!tokens) return;
+      $('tokensDisplay').textContent = tokens.remaining;
+      $('mTokens').textContent = `${tokens.remaining}/${tokens.total}`;
     }
 
+    function updateMetrics(m) {
+      if (!m) return;
+      $('mChats').textContent = m.chats_total || 0;
+      $('mQuotes').textContent = m.quotes_sent || 0;
+      $('mSales').textContent = m.sinpe_confirmed || 0;
+      $('mYes').textContent = m.intent_yes || 0;
+      $('mNo').textContent = m.intent_no || 0;
+      $('mEnvio').textContent = m.delivery_envio || 0;
+      $('mRecoger').textContent = m.delivery_recoger || 0;
+    }
+
+    // === SETTINGS ===
+    $('toggleSound').onclick = () => {
+      settings.sound = !settings.sound;
+      saveSettings();
+      applySettings();
+    };
+
+    $('toggleVibrate').onclick = () => {
+      settings.vibrate = !settings.vibrate;
+      saveSettings();
+      applySettings();
+    };
+
+    $('toggleDark').onclick = () => {
+      settings.dark = !settings.dark;
+      saveSettings();
+      applySettings();
+    };
+
+    $('darkToggle').onclick = () => {
+      settings.dark = !settings.dark;
+      saveSettings();
+      applySettings();
+    };
+
+    function renderQuickPrices() {
+      $('quickPricesList').innerHTML = settings.quickPrices.map((p, i) => `
+        <div class="setting-item">
+          <span>₡${p.toLocaleString()}</span>
+          <button class="btn btn-sm btn-danger" onclick="removeQuickPrice(${i})">🗑️</button>
+        </div>
+      `).join('');
+    }
+
+    function removeQuickPrice(index) {
+      settings.quickPrices.splice(index, 1);
+      saveSettings();
+      renderQuickPrices();
+    }
+
+    $('addQuickPrice').onclick = () => {
+      const price = prompt('Nuevo precio rápido (solo número):');
+      if (price && !isNaN(price) && parseInt(price) > 0) {
+        settings.quickPrices.push(parseInt(price));
+        settings.quickPrices.sort((a, b) => a - b);
+        saveSettings();
+        renderQuickPrices();
+      }
+    };
+
+    // === SEARCH ===
+    $('searchPending').oninput = renderPending;
+    $('searchChats').oninput = renderChatList;
+
+    // === INIT ===
+    loadSettings();
     pins[0].focus();
   </script>
 </body>
 </html>
+
