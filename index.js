@@ -133,7 +133,6 @@ function verifyMetaSignature(req) {
   } catch {
     return false;
   }
-}
 
 /**
  ============================
@@ -302,7 +301,6 @@ function saveProfilesToDisk() {
   } catch (e) {
     console.log("⚠️ Error guardando profiles:", e?.message);
   }
-}
 
 function loadProfilesFromDisk() {
   if (!PROFILES_PERSIST) return;
@@ -369,13 +367,11 @@ function loadSessionsFromDisk() {
           if (!Array.isArray(s.message_history)) s.message_history = [];
           sessions.set(s.waId, s);
         }
-      }
       console.log(`📱 Sesiones cargadas: ${sessions.size}`);
     }
   } catch (e) {
     console.log("⚠️ Error cargando sesiones:", e?.message);
   }
-}
 
 function saveSessionsToDisk() {
   if (!SESSIONS_PERSIST) return;
@@ -390,7 +386,6 @@ function saveSessionsToDisk() {
   } catch (e) {
     console.log("⚠️ Error guardando sesiones:", e?.message);
   }
-}
 
 setInterval(() => {
   if (SESSIONS_PERSIST && sessions.size > 0) saveSessionsToDisk();
@@ -449,7 +444,6 @@ function loadStatsFromDisk() {
   } catch (e) {
     console.log("⚠️ Error cargando stats:", e?.message);
   }
-}
 
 function saveStatsToDisk() {
   if (!STATS_PERSIST) return;
@@ -463,7 +457,6 @@ function saveStatsToDisk() {
   } catch (e) {
     console.log("⚠️ Error guardando stats:", e?.message);
   }
-}
 
 setInterval(() => {
   if (STATS_PERSIST) saveStatsToDisk();
@@ -831,9 +824,7 @@ async function waPost(payload, label = "WA") {
             );
           } catch {}
         }
-      }
-    }
-
+    
     return { ok: r.ok, status: r.status, text: txt };
   } catch (e) {
     console.log(`⚠️ ${label} EXCEPTION:`, e?.message);
@@ -847,7 +838,6 @@ async function waPost(payload, label = "WA") {
     }
     return { ok: false, status: 0, text: String(e?.message || "error") };
   }
-}
 
 async function sendWhatsApp(toWaId, bodyText) {
   return waPost(
