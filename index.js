@@ -2112,9 +2112,6 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 /**
- ============================
- INICIAR SERVIDOR (AL FINAL)
- ============================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   loadProfilesFromDisk();
