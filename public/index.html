@@ -311,6 +311,8 @@
     .btn-primary:hover { box-shadow: 0 4px 15px rgba(45, 156, 219, 0.4); }
     .btn-danger { background: var(--danger); color: #fff; }
     .btn-danger:hover { background: #c0392b; }
+    .btn-warning { background: var(--warning); color: #fff; }
+    .btn-warning:hover { background: #e67e22; }
     .btn-info { background: var(--accent-blue); color: #fff; }
     .btn-info:hover { background: #2196F3; }
     .btn-secondary { background: var(--bg); color: var(--text); }
@@ -900,7 +902,7 @@
         <div class="settings-title">ℹ️ Info</div>
         <div class="setting-item">
           <span class="setting-label">Versión</span>
-          <span style="color:var(--text-muted)">2.0 Pro</span>
+          <span style="color:var(--text-muted)">3.0 Flujo B2</span>
         </div>
       </div>
       <div class="settings-section">
@@ -911,24 +913,61 @@
     </div>
   </div>
 
-  <!-- MODAL PRECIO -->
+  <!-- MODAL PRECIO BASE (Flujo B2: sin envío) -->
   <div class="modal-overlay" id="priceModal">
     <div class="modal">
       <div class="modal-handle"></div>
-      <div class="modal-title">💰 Enviar Precio</div>
+      <div class="modal-title">💰 Dar Precio Base</div>
       <div class="modal-client" id="modalClient">506 0000-0000</div>
+      <div style="background:rgba(45,156,219,0.1);padding:0.8rem;border-radius:12px;margin-bottom:1rem;font-size:0.9rem;color:var(--primary-light);">
+        ℹ️ <strong>Flujo B2:</strong> Primero el precio, luego el bot pregunta zona al cliente, y después vos das el envío.
+      </div>
       <div class="input-group">
-        <label>Precio del producto</label>
+        <label>Precio del producto (sin envío)</label>
         <input type="number" class="price-input" id="inputPrice" placeholder="₡0" inputmode="numeric">
       </div>
       <div class="quick-prices" id="quickPricesGrid"></div>
-      <div class="input-group">
-        <label>Costo de envío (opcional)</label>
-        <input type="number" class="price-input" id="inputShipping" placeholder="₡0" inputmode="numeric" style="font-size:1.3rem;">
-      </div>
       <div class="modal-actions">
         <button class="btn btn-secondary" id="modalCancel">Cancelar</button>
-        <button class="btn btn-primary" id="modalSend">Enviar ✓</button>
+        <button class="btn btn-primary" id="modalSend">Enviar Precio ✓</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL ENVÍO (Flujo B2: después de zona) -->
+  <div class="modal-overlay" id="shippingModal">
+    <div class="modal">
+      <div class="modal-handle"></div>
+      <div class="modal-title">📦 Calcular Envío</div>
+      <div class="modal-client" id="shippingModalClient">506 0000-0000</div>
+      <div style="background:rgba(0,212,170,0.1);padding:1rem;border-radius:12px;margin-bottom:1rem;">
+        <div style="font-size:0.9rem;color:var(--text-muted);margin-bottom:0.3rem;">📍 Zona del cliente:</div>
+        <div style="font-size:1.1rem;font-weight:600;" id="shippingModalZone">Heredia, San Pablo</div>
+      </div>
+      <div style="background:var(--bg);padding:0.8rem;border-radius:12px;margin-bottom:1rem;">
+        <div style="display:flex;justify-content:space-between;">
+          <span style="color:var(--text-muted);">Precio base:</span>
+          <span style="font-weight:600;" id="shippingModalPrice">₡0</span>
+        </div>
+      </div>
+      <div class="input-group">
+        <label>Costo de envío a esa zona</label>
+        <input type="number" class="price-input" id="inputShippingCost" placeholder="₡0" inputmode="numeric">
+      </div>
+      <div class="quick-prices" id="quickShippingGrid">
+        <button class="quick-price" onclick="selectQuickShipping(this, 2000)">₡2,000</button>
+        <button class="quick-price" onclick="selectQuickShipping(this, 2500)">₡2,500</button>
+        <button class="quick-price" onclick="selectQuickShipping(this, 3000)">₡3,000</button>
+        <button class="quick-price" onclick="selectQuickShipping(this, 3500)">₡3,500</button>
+        <button class="quick-price" onclick="selectQuickShipping(this, 4000)">₡4,000</button>
+        <button class="quick-price" onclick="selectQuickShipping(this, 5000)">₡5,000</button>
+      </div>
+      <div class="modal-actions" style="flex-direction:column;gap:0.5rem;">
+        <div style="display:flex;gap:0.5rem;">
+          <button class="btn btn-secondary" style="flex:1;" id="shippingModalCancel">Cancelar</button>
+          <button class="btn btn-primary" style="flex:1;" id="shippingModalSend">Enviar ✓</button>
+        </div>
+        <button class="btn btn-warning" style="width:100%;" id="shippingModalNoEnvio">🚫 No hago envío a esa zona</button>
       </div>
     </div>
   </div>
@@ -980,6 +1019,15 @@
       <div class="modal-actions">
         <button class="btn btn-secondary" id="contactModalCancel">Cancelar</button>
         <button class="btn btn-primary" id="contactModalSave">Guardar ✓</button>
+      </div>
+      
+      <!-- Acciones peligrosas -->
+      <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--bg);">
+        <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.8rem;">Acciones</div>
+        <div style="display:flex;gap:0.5rem;">
+          <button class="btn btn-warning btn-sm" style="flex:1;" id="contactDeleteChats">🗑️ Borrar chats</button>
+          <button class="btn btn-danger btn-sm" style="flex:1;" id="contactDeleteContact">❌ Eliminar contacto</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1181,6 +1229,8 @@
           toast('✅ ¡Conectado!', 'success');
         }
         window.isAutoLogin = false;
+        // Inicializar Push Notifications después de login exitoso
+        initPushNotifications();
       });
 
       socket.on('auth_error', msg => {
@@ -1220,6 +1270,12 @@
         renderPending();
         playNotification();
         toast('📥 Nueva consulta de ' + formatPhone(item.waId), 'success');
+        // Push notification
+        sendPushNotification(
+          '📸 Nueva consulta',
+          formatPhone(item.waId) + ': ' + (item.details || 'Foto de producto').slice(0, 50),
+          'pending-' + item.waId
+        );
       });
 
       socket.on('pending_resolved', data => {
@@ -1234,6 +1290,12 @@
         if (currentChat === msg.waId) renderChatMessages();
         if (msg.direction === 'in') {
           playNotification();
+          // Push notification para mensajes entrantes
+          sendPushNotification(
+            '💬 Nuevo mensaje',
+            formatPhone(msg.waId) + ': ' + (msg.text || '(imagen)').slice(0, 50),
+            'msg-' + msg.waId
+          );
         }
       });
 
@@ -1241,9 +1303,24 @@
         if (result.success) {
           toast('✅ ' + result.message, 'success');
           closeModal();
+          closeShippingModal();
         } else {
           toast('❌ ' + result.message, 'error');
         }
+      });
+
+      // FLUJO B2: Cliente envió su zona, abrir modal de envío
+      socket.on('zone_received', data => {
+        playNotification();
+        toast('📍 ' + formatPhone(data.waId) + ' está en: ' + data.zone, 'success');
+        // Push notification
+        sendPushNotification(
+          '📍 Zona recibida',
+          formatPhone(data.waId) + ' está en: ' + data.zone + '\n¿Cuánto de envío?',
+          'zone-' + data.waId
+        );
+        // Abrir automáticamente el modal de envío
+        openShippingModal(data.waId, data.zone, data.basePrice);
       });
 
       socket.on('metrics', data => {
@@ -1291,51 +1368,68 @@
       }
     }
 
-    // === TIMER DE INACTIVIDAD (10 minutos) ===
-    const INACTIVITY_TIMEOUT = 10 * 60 * 1000; // 10 minutos en milisegundos
-    let inactivityTimer;
-
-    function resetInactivityTimer() {
-      sessionStorage.setItem('ticobot_lastActivity', Date.now().toString());
-      clearTimeout(inactivityTimer);
-      inactivityTimer = setTimeout(logoutByInactivity, INACTIVITY_TIMEOUT);
-    }
-
-    function logoutByInactivity() {
-      sessionStorage.removeItem('ticobot_pin');
-      sessionStorage.removeItem('ticobot_lastActivity');
-      if (socket) socket.disconnect();
-      toast('🔒 Sesión cerrada por inactividad', 'warning');
-      setTimeout(() => location.reload(), 1500);
-    }
-
-    function checkLastActivity() {
-      const lastActivity = sessionStorage.getItem('ticobot_lastActivity');
-      if (lastActivity) {
-        const elapsed = Date.now() - parseInt(lastActivity);
-        if (elapsed > INACTIVITY_TIMEOUT) {
-          // Expiró mientras estaba cerrado
-          sessionStorage.removeItem('ticobot_pin');
-          sessionStorage.removeItem('ticobot_lastActivity');
-          return false;
+    // === PUSH NOTIFICATIONS (PWA) ===
+    let pushPermission = 'default';
+    
+    async function initPushNotifications() {
+      if (!('Notification' in window)) {
+        console.log('Este navegador no soporta notificaciones');
+        return;
+      }
+      
+      pushPermission = Notification.permission;
+      
+      if (pushPermission === 'default') {
+        // Pedir permiso después de login exitoso
+        const permission = await Notification.requestPermission();
+        pushPermission = permission;
+        if (permission === 'granted') {
+          toast('🔔 Notificaciones activadas', 'success');
         }
       }
-      return true;
+      
+      // Registrar Service Worker si existe
+      if ('serviceWorker' in navigator) {
+        try {
+          await navigator.serviceWorker.register('/sw.js');
+          console.log('Service Worker registrado');
+        } catch (e) {
+          console.log('Service Worker no disponible:', e.message);
+        }
+      }
+    }
+    
+    function sendPushNotification(title, body, tag = 'ticobot') {
+      if (pushPermission !== 'granted') return;
+      
+      // No enviar si la página está visible
+      if (document.visibilityState === 'visible') return;
+      
+      try {
+        const notification = new Notification(title, {
+          body: body,
+          icon: '/icon-192.png',
+          badge: '/icon-192.png',
+          tag: tag,
+          vibrate: [200, 100, 200],
+          requireInteraction: true
+        });
+        
+        notification.onclick = () => {
+          window.focus();
+          notification.close();
+        };
+      } catch (e) {
+        console.log('Error enviando notificación:', e.message);
+      }
     }
 
-    // Detectar actividad del usuario
-    ['click', 'touchstart', 'keypress', 'scroll'].forEach(event => {
-      document.addEventListener(event, resetInactivityTimer, { passive: true });
-    });
-
-    // Auto-login si hay PIN guardado Y no expiró
+    // Auto-login si hay PIN guardado (sin expiración)
     const savedPin = sessionStorage.getItem('ticobot_pin');
-    if (savedPin && checkLastActivity()) {
+    if (savedPin) {
       window.isAutoLogin = true;
       connectWithPin(savedPin);
-      resetInactivityTimer();
     } else {
-      sessionStorage.removeItem('ticobot_pin');
       pins[0].focus();
     }
 
@@ -1498,16 +1592,22 @@
 
     function selectQuickPrice(price, btn) {
       $('inputPrice').value = price;
-      $$('.quick-price').forEach(b => b.classList.remove('selected'));
+      $$('#quickPricesGrid .quick-price').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
+    }
+
+    function selectQuickShipping(btn, cost) {
+      $('inputShippingCost').value = cost;
+      $$('#quickShippingGrid .quick-price').forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
     }
 
     $('modalCancel').onclick = closeModal;
     $('priceModal').onclick = e => { if (e.target === $('priceModal')) closeModal(); };
 
+    // FLUJO B2: Solo envía precio base (sin envío)
     $('modalSend').onclick = () => {
       const price = parseInt($('inputPrice').value) || 0;
-      const shipping = parseInt($('inputShipping').value) || 0;
       if (price < 100) {
         toast('⚠️ Ingresá un precio válido', 'warning');
         return;
@@ -1515,14 +1615,64 @@
       socket.emit('action', {
         clientWaId: currentClient,
         actionType: 'PRECIO',
-        payload: { price, shipping }
+        payload: { price }  // Sin shipping - Flujo B2
       });
+    };
+
+    // === SHIPPING MODAL (Flujo B2) ===
+    let currentShippingClient = null;
+    let currentShippingPrice = 0;
+
+    function openShippingModal(waId, zone, basePrice) {
+      currentShippingClient = waId;
+      currentShippingPrice = basePrice;
+      $('shippingModalClient').textContent = formatPhone(waId);
+      $('shippingModalZone').textContent = zone || '(Sin zona)';
+      $('shippingModalPrice').textContent = '₡' + (basePrice || 0).toLocaleString();
+      $('inputShippingCost').value = '';
+      $$('#quickShippingGrid .quick-price').forEach(b => b.classList.remove('selected'));
+      $('shippingModal').classList.add('active');
+      setTimeout(() => $('inputShippingCost').focus(), 300);
+    }
+
+    function closeShippingModal() {
+      $('shippingModal').classList.remove('active');
+      currentShippingClient = null;
+      currentShippingPrice = 0;
+    }
+
+    $('shippingModalCancel').onclick = closeShippingModal;
+    $('shippingModal').onclick = e => { if (e.target === $('shippingModal')) closeShippingModal(); };
+
+    $('shippingModalSend').onclick = () => {
+      const shipping = parseInt($('inputShippingCost').value) || 0;
+      if (shipping < 100) {
+        toast('⚠️ Ingresá un costo de envío válido', 'warning');
+        return;
+      }
+      socket.emit('action', {
+        clientWaId: currentShippingClient,
+        actionType: 'ENVIO',
+        payload: { shipping }
+      });
+      closeShippingModal();
+    };
+
+    $('shippingModalNoEnvio').onclick = () => {
+      if (confirm('¿No hacés envío a esa zona? Se le ofrecerá solo recoger en tienda.')) {
+        socket.emit('action', {
+          clientWaId: currentShippingClient,
+          actionType: 'NO_ENVIO_ZONA'
+        });
+        closeShippingModal();
+      }
     };
 
     function sendAction(waId, type) {
       const messages = {
         'NO_HAY': '¿Confirmar "No hay stock"?',
-        'CATALOGO': '¿Enviar catálogo?'
+        'CATALOGO': '¿Enviar catálogo?',
+        'PAGADO': '¿Confirmar pago recibido?'
       };
       if (confirm(messages[type] || '¿Confirmar?')) {
         socket.emit('action', { clientWaId: waId, actionType: type });
@@ -1707,6 +1857,31 @@
     $('contactVip').onclick = () => $('contactVip').classList.toggle('active');
     $('contactBlocked').onclick = () => $('contactBlocked').classList.toggle('active');
 
+    // Borrar chats del contacto
+    $('contactDeleteChats').onclick = () => {
+      if (!currentContact) return;
+      if (confirm(`¿Borrar todos los chats con ${formatPhone(currentContact)}?\n\nEsto no se puede deshacer.`)) {
+        socket.emit('delete_chats', { waId: currentContact });
+        delete chats[currentContact];
+        renderChatList();
+        toast('🗑️ Chats borrados', 'success');
+      }
+    };
+
+    // Eliminar contacto completamente
+    $('contactDeleteContact').onclick = () => {
+      if (!currentContact) return;
+      if (confirm(`¿Eliminar el contacto ${formatPhone(currentContact)} completamente?\n\nSe borrarán también sus chats y datos. Esto no se puede deshacer.`)) {
+        socket.emit('delete_contact', { waId: currentContact });
+        delete contacts[currentContact];
+        delete chats[currentContact];
+        renderContacts();
+        renderChatList();
+        closeContactModal();
+        toast('❌ Contacto eliminado', 'success');
+      }
+    };
+
     $('contactModalSave').onclick = () => {
       if (!currentContact) return;
       
@@ -1815,4 +1990,3 @@
   </script>
 </body>
 </html>
-
