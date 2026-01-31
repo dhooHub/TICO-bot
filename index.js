@@ -7,6 +7,58 @@
  * ✅ Panel Web en tiempo real (Socket.io)
  * ✅ El dueño controla desde su celular
  * ✅ PWA instalable
+ * ✅ FLUJO B2: Precio base → Zona → Envío → Ambas opciones
+ * 
+ * ============================
+ * MAPA DE ESTADOS (FLUJO B2)
+ * ============================
+ *
+ * NEW
+ *  - Saludo/info → pide foto
+ *  - Foto + texto → ESPERANDO_CONFIRMACION_VENDEDOR (notifica dueño)
+ *
+ * ESPERANDO_CONFIRMACION_VENDEDOR
+ *  - Cliente: no avanza (espera dueño)
+ *  - Dueño: da precio BASE → ESPERANDO_ZONA
+ *  - Dueño: "no hay" → CERRADO_SIN_STOCK
+ *
+ * ESPERANDO_ZONA
+ *  - Bot preguntó: "¿De qué provincia y lugar?"
+ *  - Cliente responde zona → guarda client_zone → ZONA_RECIBIDA
+ *  - Notifica dueño: "Cliente en [zona], ¿cuánto de envío?"
+ *
+ * ZONA_RECIBIDA
+ *  - Cliente: no avanza (espera dueño)
+ *  - Dueño: da costo envío → PRECIO_TOTAL_ENVIADO
+ *  - Dueño: "no envío" → ofrece solo recoger
+ *
+ * PRECIO_TOTAL_ENVIADO
+ *  - Bot mostró AMBAS opciones (envío vs recoger)
+ *  - Botones: [COMPRAR] [NO GRACIAS]
+ *  - Cliente "COMPRAR" → CONSUME FICHA → PREGUNTANDO_METODO
+ *  - Cliente "NO GRACIAS" → CERRADO_SIN_INTERES
+ *
+ * PREGUNTANDO_METODO
+ *  - Botones: [ENVÍO] [RECOGER]
+ *  - "envío" → PIDIENDO_DATOS
+ *  - "recoger" → PIDIENDO_DATOS_RECOGER
+ *
+ * PIDIENDO_DATOS / PIDIENDO_DATOS_RECOGER
+ *  - Cliente manda datos → genera sinpe_reference
+ *  - Envía SINPE completo → ESPERANDO_SINPE
+ *  - Notifica dueño
+ *
+ * ESPERANDO_SINPE
+ *  - "ya pagué" SIN foto → pide adjuntar comprobante
+ *  - Foto comprobante → notifica dueño, espera confirmación
+ *  - Dueño: confirma → PAGO_CONFIRMADO
+ *
+ * PAGO_CONFIRMADO
+ *  - Confirmación + entrega → resetCase()
+ *
+ * CERRADO_TIMEOUT / CERRADO_SIN_INTERES / CERRADO_SIN_STOCK
+ *  - Cliente vuelve → resetCase() → NEW
+ *
  * ============================ */
 
 const express = require("express");
@@ -512,7 +564,11 @@ function getSession(waId) {
       last_activity: Date.now(),
       close_timer: null,
       reminder_timer: null,
-      last_offer: null,
+      // Flujo B2: precio base y envío separados
+      base_price: null,           // Precio sin envío (dueño da primero)
+      shipping_cost: null,        // Costo envío (dueño da después de zona)
+      client_zone: null,          // Zona del cliente (provincia/lugar)
+      last_offer: null,           // Oferta completa {price, shipping}
       last_offer_sent_at: null,
       delivery_method: null,
       pending_sinpe: null,
@@ -537,11 +593,15 @@ function clearTimers(session) {
 }
 
 function resetCase(session) {
-  session.state = "ESPERANDO_DETALLES";
+  session.state = "NEW";
   session.last_image_id = null;
   session.last_details_text = null;
   session.details_log = [];
   session.sent_to_seller = false;
+  // Flujo B2: limpiar precio base, envío y zona
+  session.base_price = null;
+  session.shipping_cost = null;
+  session.client_zone = null;
   session.last_offer = null;
   session.last_offer_sent_at = null;
   session.delivery_method = null;
@@ -644,9 +704,9 @@ const FRASES = {
     "Voy a revisar de una vez 👍",
   ],
   saludos: [
-    "¡Hola! Pura vida 🙌",
-    "¡Hola! ¿Cómo estás? 🙌",
-    "¡Hola! Qué gusto 👋",
+    "¡Hola! ¿Cómo estás? 🙌 Un gusto servirte.",
+    "¡Hola! Pura vida 🙌 ¿En qué te ayudo?",
+    "¡Hola! Qué gusto 👋 Con gusto te atiendo.",
     "¡Buenas! Pura vida 🙌",
     "¡Hola! Con gusto te ayudo 😊",
   ],
@@ -683,6 +743,23 @@ const FRASES = {
     "¡Gracias por la confianza! 💪",
     "¡Tuanis! 🙌",
     "¡Con mucho gusto! 😊",
+  ],
+  // Flujo B2: preguntar zona
+  pedir_zona: [
+    "¿De qué provincia y lugar nos escribís? 📍",
+    "¿De dónde sos? Provincia y zona 📍",
+    "Para calcular el envío, ¿de qué parte del país nos escribís? 📍",
+  ],
+  // Flujo B2: confirmar interés antes de zona
+  te_interesa: [
+    "¿Te interesa ese producto? 🤔",
+    "¿Querés que te lo aparte? 🤔", 
+    "¿Te gustaría llevártelo? 🤔",
+  ],
+  // Flujo B2: nocturno flexible
+  nocturno: [
+    "Pura vida 🙌 A esta hora la bodega ya cerró. Mandame foto y detalles, y apenas tenga la información te aviso 😊",
+    "¡Hola! 🌙 Ya cerramos por hoy. Dejame tu foto y detalles, y apenas pueda te confirmo 🙌",
   ],
 };
 
@@ -925,36 +1002,133 @@ function resetCloseTimer(session) {
 async function executeAction(clientWaId, actionType, data = {}) {
   const clientSession = getSession(clientWaId);
   
+  // FLUJO B2: Precio BASE (sin envío) → pregunta zona al cliente
   if (actionType === "PRECIO") {
     const price = Number(data.price || 0);
-    const shipping = Number(data.shipping || 0);
 
-    clientSession.last_offer = { price, shipping };
-    clientSession.last_offer_sent_at = Date.now();
-    clientSession.state = "PRECIO_ENVIADO";
+    // Guardar precio base (sin envío todavía)
+    clientSession.base_price = price;
+    clientSession.shipping_cost = null; // Se llenará después
+    clientSession.state = "ESPERANDO_ZONA";
     
     removePendingQuote(clientWaId);
     account.metrics.quotes_sent += 1;
     if (STATS_PERSIST) saveStatsToDisk();
 
-    const total = price + shipping;
-    const msg = `${fraseNoRepetir("si_hay", clientWaId)}\n\nPrecio: ₡${price.toLocaleString()}` +
-      (shipping ? `\nEnvío: ₡${shipping.toLocaleString()}` : "") +
-      `\nTotal: ₡${total.toLocaleString()}\n\n¿Lo querés?`;
+    // Mensaje: Sí hay + precio + pregunta zona
+    const msg = `${fraseNoRepetir("si_hay", clientWaId)}\n\n` +
+      `Precio: ₡${price.toLocaleString()}\n\n` +
+      `${fraseNoRepetir("pedir_zona", clientWaId)}`;
 
-    await sendButtons(clientWaId, msg, [
-      { id: "BTN_YES", title: "Sí, lo quiero" },
-      { id: "BTN_NO", title: "No, gracias" },
-      { id: "BTN_MORE", title: "Enviar otra foto" },
-    ]);
+    await sendWhatsApp(clientWaId, msg);
 
     resetCloseTimer(clientSession);
-    return { success: true, message: `Precio enviado a ${clientWaId}` };
+    return { success: true, message: `Precio ₡${price.toLocaleString()} enviado. Esperando zona del cliente.` };
+  }
+
+  // FLUJO B2: Dueño da costo de ENVÍO después de saber zona
+  if (actionType === "ENVIO") {
+    const shipping = Number(data.shipping || 0);
+    
+    if (clientSession.state !== "ZONA_RECIBIDA") {
+      return { success: false, message: "El cliente aún no ha dado su zona" };
+    }
+
+    clientSession.shipping_cost = shipping;
+    clientSession.last_offer = { 
+      price: clientSession.base_price, 
+      shipping: shipping 
+    };
+    clientSession.last_offer_sent_at = Date.now();
+    clientSession.state = "PRECIO_TOTAL_ENVIADO";
+    
+    if (STATS_PERSIST) saveStatsToDisk();
+
+    const price = clientSession.base_price || 0;
+    const totalEnvio = price + shipping;
+
+    // Mostrar AMBAS opciones al cliente
+    let msg = `${fraseNoRepetir("confirmacion", clientWaId)}\n\n`;
+    
+    if (offersShipping() && offersPickup()) {
+      // Tiene ambas opciones
+      msg += `📦 *Con envío:* ₡${totalEnvio.toLocaleString()}\n` +
+        `   (Producto ₡${price.toLocaleString()} + Envío ₡${shipping.toLocaleString()})\n\n` +
+        `🏪 *Recoger en tienda:* ₡${price.toLocaleString()}\n` +
+        `   ${STORE_ADDRESS}\n\n` +
+        `¿Qué preferís?`;
+      
+      await sendButtons(clientWaId, msg, [
+        { id: "BTN_COMPRAR", title: "¡Lo quiero!" },
+        { id: "BTN_NO", title: "No, gracias" },
+      ]);
+    } else if (offersShipping() && !offersPickup()) {
+      // Solo envío
+      msg += `📦 *Total con envío:* ₡${totalEnvio.toLocaleString()}\n` +
+        `   (Producto ₡${price.toLocaleString()} + Envío ₡${shipping.toLocaleString()})\n\n` +
+        `¿Lo querés?`;
+      
+      await sendButtons(clientWaId, msg, [
+        { id: "BTN_COMPRAR", title: "¡Lo quiero!" },
+        { id: "BTN_NO", title: "No, gracias" },
+      ]);
+    } else {
+      // Solo recoger (raro pero posible)
+      msg += `🏪 *Precio:* ₡${price.toLocaleString()}\n` +
+        `   Recoger en: ${STORE_ADDRESS}\n\n` +
+        `¿Lo querés?`;
+      
+      await sendButtons(clientWaId, msg, [
+        { id: "BTN_COMPRAR", title: "¡Lo quiero!" },
+        { id: "BTN_NO", title: "No, gracias" },
+      ]);
+    }
+
+    resetCloseTimer(clientSession);
+    return { success: true, message: `Precio total enviado. Envío: ₡${shipping.toLocaleString()}` };
+  }
+
+  // FLUJO B2: Dueño dice que NO hace envío a esa zona
+  if (actionType === "NO_ENVIO_ZONA") {
+    if (clientSession.state !== "ZONA_RECIBIDA") {
+      return { success: false, message: "El cliente aún no ha dado su zona" };
+    }
+
+    const price = clientSession.base_price || 0;
+    clientSession.shipping_cost = 0;
+    clientSession.last_offer = { price, shipping: 0 };
+    clientSession.state = "PRECIO_TOTAL_ENVIADO";
+    
+    if (offersPickup()) {
+      // Ofrecer solo recoger
+      const msg = `Uy, a ${clientSession.client_zone || "esa zona"} no hacemos envíos 😔\n\n` +
+        `Pero podés recogerlo en tienda:\n` +
+        `🏪 ${STORE_ADDRESS}\n` +
+        `💰 Precio: ₡${price.toLocaleString()}\n\n` +
+        `¿Te interesa?`;
+      
+      await sendButtons(clientWaId, msg, [
+        { id: "BTN_COMPRAR", title: "Sí, lo recojo" },
+        { id: "BTN_NO", title: "No, gracias" },
+      ]);
+    } else {
+      // No hay forma de entrega
+      await sendWhatsApp(clientWaId, 
+        `Lo siento 😔 No hacemos envíos a ${clientSession.client_zone || "esa zona"} ` +
+        `y no tenemos tienda física.\n\nSi tenés otra dirección, decime 🙌`
+      );
+      resetCase(clientSession);
+      return { success: true, message: "No hay envío ni recoger para esa zona" };
+    }
+
+    resetCloseTimer(clientSession);
+    return { success: true, message: "Solo recoger ofrecido (no hay envío a esa zona)" };
   }
 
   if (actionType === "NO_HAY") {
     removePendingQuote(clientWaId);
     account.metrics.no_stock += 1;
+    clientSession.state = "CERRADO_SIN_STOCK";
     if (STATS_PERSIST) saveStatsToDisk();
 
     await sendWhatsApp(clientWaId, fraseNoRepetir("no_hay", clientWaId));
@@ -1034,10 +1208,20 @@ function shouldUseAI(session, text, hasImage) {
   if (session.paused) return false;
   if ((session.ai_used_count || 0) >= 3) return false;
 
+  // FLUJO B2: Estados donde NO usar IA
   const critical = [
-    "PRECIO_ENVIADO", "PREGUNTANDO_METODO", "PIDIENDO_DATOS",
-    "PIDIENDO_DATOS_RECOGER", "ESPERANDO_SINPE", "PAGO_CONFIRMADO",
-    "CERRADO_TIMEOUT", "ESPERANDO_CONFIRMACION_VENDEDOR",
+    "ESPERANDO_CONFIRMACION_VENDEDOR",
+    "ESPERANDO_ZONA",           // Nuevo B2
+    "ZONA_RECIBIDA",            // Nuevo B2
+    "PRECIO_TOTAL_ENVIADO",     // Nuevo B2
+    "PREGUNTANDO_METODO", 
+    "PIDIENDO_DATOS",
+    "PIDIENDO_DATOS_RECOGER", 
+    "ESPERANDO_SINPE", 
+    "PAGO_CONFIRMADO",
+    "CERRADO_TIMEOUT",
+    "CERRADO_SIN_INTERES",
+    "CERRADO_SIN_STOCK",
   ];
   if (critical.includes(session.state)) return false;
 
@@ -1152,9 +1336,10 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
   // Agregar mensaje entrante al historial del panel
   addToChatHistory(waId, "in", text || "(imagen)", hasImage ? imageId : null);
 
-  // Normaliza IDs de botones
+  // Normaliza IDs de botones (Flujo B2)
   if (text === "BTN_YES") text = "si";
   if (text === "BTN_NO") text = "no";
+  if (text === "BTN_COMPRAR") text = "comprar";  // FLUJO B2: botón de compra
   if (text === "BTN_MORE") text = "otra foto";
   if (text === "BTN_ENVIO") text = "envio";
   if (text === "BTN_RECOGER") text = "recoger";
@@ -1193,10 +1378,7 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
     if (isInfo) {
       account.metrics.night_leads += 1;
       if (STATS_PERSIST) saveStatsToDisk();
-      await sendWhatsApp(
-        waId,
-        `Pura vida 🙌 A esta hora la bodega ya está cerrada.\nMandáme foto y detalles (talla/color) y mañana te confirmo apenas abran. 😊`
-      );
+      await sendWhatsApp(waId, fraseNoRepetir("nocturno", waId));
       return;
     }
   }
@@ -1256,23 +1438,73 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
 
   if (session.state === "ESPERANDO_CONFIRMACION_VENDEDOR") return;
 
-  // PRECIO_ENVIADO
-  if (session.state === "PRECIO_ENVIADO") {
+  // ========================================
+  // FLUJO B2: ESPERANDO_ZONA
+  // El cliente recibió precio base, bot preguntó zona
+  // ========================================
+  if (session.state === "ESPERANDO_ZONA") {
+    resetCloseTimer(session);
+    
+    // Guardar la zona del cliente
+    session.client_zone = String(text || "").trim();
+    session.state = "ZONA_RECIBIDA";
+    
+    const price = session.base_price || 0;
+    
+    // Notificar al panel web (abre modal automáticamente)
+    io.emit("zone_received", {
+      waId: waId,
+      zone: session.client_zone,
+      basePrice: price
+    });
+    
+    // Notificar al dueño por WhatsApp también
+    await notifyOwner(
+      `📍 ZONA RECIBIDA\n` +
+      `📱 Cliente: ${waId}\n` +
+      `🗺️ Zona: ${session.client_zone}\n` +
+      `💰 Precio base: ₡${price.toLocaleString()}\n\n` +
+      `¿Cuánto de envío? Respondé desde el panel.`
+    );
+    
+    await sendWhatsApp(waId, "¡Anotado! 📝 Dame un momento para calcular el envío a tu zona 🙌");
+    return;
+  }
+
+  // ========================================
+  // FLUJO B2: ZONA_RECIBIDA
+  // Esperando que el dueño dé el costo de envío
+  // ========================================
+  if (session.state === "ZONA_RECIBIDA") {
+    // Cliente escribió pero aún esperamos al dueño
+    await sendWhatsApp(waId, "Estoy esperando confirmación del envío a tu zona. ¡Ya te aviso! 🙌");
+    return;
+  }
+
+  // ========================================
+  // FLUJO B2: PRECIO_TOTAL_ENVIADO
+  // Cliente vio AMBAS opciones, esperando decisión
+  // ========================================
+  if (session.state === "PRECIO_TOTAL_ENVIADO") {
     resetCloseTimer(session);
 
-    if (isYes(text)) {
-      if (!canConsumeToken()) return sendWhatsApp(waId, msgOutOfTokens());
-      consumeToken("INTENCION_SI");
+    // Cliente presiona COMPRAR → AHORA SE COBRA LA FICHA
+    if (text === "comprar" || isYes(text)) {
+      if (!canConsumeToken()) {
+        await sendWhatsApp(waId, msgOutOfTokens());
+        return;
+      }
+      consumeToken("COMPRAR_CONFIRMADO");
       account.metrics.intent_yes += 1;
       if (STATS_PERSIST) saveStatsToDisk();
 
+      // Preguntar método de entrega
       if (offersShipping() && offersPickup()) {
         await sendButtons(waId, `${fraseNoRepetir("confirmacion", waId)}\n\n¿Cómo lo preferís?`, [
-          { id: "BTN_ENVIO", title: "Envío" },
-          { id: "BTN_RECOGER", title: "Recoger" },
+          { id: "BTN_ENVIO", title: "📦 Envío" },
+          { id: "BTN_RECOGER", title: "🏪 Recoger" },
         ]);
         session.state = "PREGUNTANDO_METODO";
-        resetCloseTimer(session);
         return;
       }
 
@@ -1280,9 +1512,16 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
         session.delivery_method = "envio";
         account.metrics.delivery_envio += 1;
         if (STATS_PERSIST) saveStatsToDisk();
-        await sendWhatsApp(waId, `${fraseNoRepetir("confirmacion", waId)}\n\nPasame nombre completo, dirección exacta y teléfono 📝`);
+        await sendWhatsApp(waId, 
+          `${fraseNoRepetir("confirmacion", waId)}\n\n` +
+          `Pasame tus datos para el envío:\n` +
+          `📍 Provincia:\n` +
+          `📍 Cantón:\n` +
+          `📍 Distrito:\n` +
+          `📍 Otras señas:\n` +
+          `📞 Teléfono:`
+        );
         session.state = "PIDIENDO_DATOS";
-        resetCloseTimer(session);
         return;
       }
 
@@ -1290,39 +1529,56 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
         session.delivery_method = "recoger";
         account.metrics.delivery_recoger += 1;
         if (STATS_PERSIST) saveStatsToDisk();
-        const msg = hasPhysicalLocation()
-          ? `${fraseNoRepetir("confirmacion", waId)}\n\n📍 ${STORE_ADDRESS}\n🕒 ${HOURS_DAY}\n\nNombre y teléfono:`
-          : `${fraseNoRepetir("confirmacion", waId)}\n\nNombre y teléfono:`;
-        await sendWhatsApp(waId, msg);
+        await sendWhatsApp(waId, 
+          `${fraseNoRepetir("confirmacion", waId)}\n\n` +
+          `📍 ${STORE_ADDRESS}\n` +
+          `🕒 ${HOURS_DAY}\n\n` +
+          `Pasame tu nombre y teléfono:`
+        );
         session.state = "PIDIENDO_DATOS_RECOGER";
-        resetCloseTimer(session);
         return;
       }
     }
 
+    // Cliente dice NO
     if (isNo(text)) {
       account.metrics.intent_no += 1;
+      session.state = "CERRADO_SIN_INTERES";
       if (STATS_PERSIST) saveStatsToDisk();
       await sendWhatsApp(waId, fraseNoRepetir("no_quiere", waId));
       resetCase(session);
       return;
     }
 
+    // Cliente quiere otra foto
     if (norm(text).includes("otra foto")) {
       await sendWhatsApp(waId, "Dale 🙌 Mandame la foto del producto 📸");
       resetCase(session);
       return;
     }
+
+    // No entendió - repetir opciones
+    return;
   }
 
-  // PREGUNTANDO_METODO
+  // ========================================
+  // PREGUNTANDO_METODO (después de COMPRAR)
+  // ========================================
   if (session.state === "PREGUNTANDO_METODO") {
     const method = detectDeliveryMethod(text);
     if (method === "envio") {
       session.delivery_method = "envio";
       account.metrics.delivery_envio += 1;
       if (STATS_PERSIST) saveStatsToDisk();
-      await sendWhatsApp(waId, `¡Listo! 🙌\n\nNombre completo, dirección exacta y teléfono 📝`);
+      await sendWhatsApp(waId, 
+        `¡Listo! 🙌\n\n` +
+        `Pasame tus datos para el envío:\n` +
+        `📍 Provincia:\n` +
+        `📍 Cantón:\n` +
+        `📍 Distrito:\n` +
+        `📍 Otras señas:\n` +
+        `📞 Teléfono:`
+      );
       session.state = "PIDIENDO_DATOS";
       resetCloseTimer(session);
       return;
@@ -1331,7 +1587,12 @@ async function handleClientMessage(waIdRaw, textRaw, hasImage, imageId) {
       session.delivery_method = "recoger";
       account.metrics.delivery_recoger += 1;
       if (STATS_PERSIST) saveStatsToDisk();
-      await sendWhatsApp(waId, `Perfecto 🏪\n\n📍 ${STORE_ADDRESS}\n🕒 ${HOURS_DAY}\n\nNombre y teléfono:`);
+      await sendWhatsApp(waId, 
+        `Perfecto 🏪\n\n` +
+        `📍 ${STORE_ADDRESS}\n` +
+        `🕒 ${HOURS_DAY}\n\n` +
+        `Pasame tu nombre y teléfono:`
+      );
       session.state = "PIDIENDO_DATOS_RECOGER";
       resetCloseTimer(session);
       return;
@@ -1602,6 +1863,70 @@ io.on("connection", (socket) => {
     io.emit("contact_updated", profile);
     
     console.log(`👤 Contacto CREADO: ${normalized} - ${name}`);
+  });
+
+  // Borrar chats de un contacto
+  socket.on("delete_chats", (data) => {
+    const { waId } = data;
+    if (!waId) return;
+
+    const normalized = normalizeCRPhone(waId);
+    
+    // Borrar historial de chat
+    chatHistory.delete(normalized);
+    
+    // Borrar sesión activa
+    if (sessions.has(normalized)) {
+      const session = sessions.get(normalized);
+      clearTimers(session);
+      sessions.delete(normalized);
+    }
+    
+    // Borrar de pendientes
+    removePendingQuote(normalized);
+    
+    if (SESSIONS_PERSIST) saveSessionsToDisk();
+    
+    console.log(`🗑️ Chats borrados: ${normalized}`);
+    
+    // Notificar a todos los paneles
+    io.emit("chats_deleted", { waId: normalized });
+  });
+
+  // Eliminar contacto completamente
+  socket.on("delete_contact", (data) => {
+    const { waId } = data;
+    if (!waId) return;
+
+    const normalized = normalizeCRPhone(waId);
+    
+    // Borrar perfil
+    profiles.delete(normalized);
+    
+    // Borrar de sets VIP/bloqueados
+    vipSet.delete(normalized);
+    blockedSet.delete(normalized);
+    
+    // Borrar historial de chat
+    chatHistory.delete(normalized);
+    
+    // Borrar sesión activa
+    if (sessions.has(normalized)) {
+      const session = sessions.get(normalized);
+      clearTimers(session);
+      sessions.delete(normalized);
+    }
+    
+    // Borrar de pendientes
+    removePendingQuote(normalized);
+    
+    if (PROFILES_PERSIST) saveProfilesToDisk();
+    if (SESSIONS_PERSIST) saveSessionsToDisk();
+    
+    console.log(`❌ Contacto ELIMINADO: ${normalized}`);
+    
+    // Notificar a todos los paneles
+    io.emit("contact_deleted", { waId: normalized });
   });
   
   socket.on("disconnect", () => {
