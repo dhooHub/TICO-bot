@@ -1866,14 +1866,15 @@ io.on("connection", (socket) => {
   });
 
   // Borrar chats de un contacto
+  // ✅ CORREGIDO: chatHistory es un array, no un Map
   socket.on("delete_chats", (data) => {
     const { waId } = data;
     if (!waId) return;
 
     const normalized = normalizeCRPhone(waId);
     
-    // Borrar historial de chat
-    chatHistory.delete(normalized);
+    // Borrar historial de chat (chatHistory es un ARRAY, usar filter)
+    chatHistory = chatHistory.filter(m => m.waId !== normalized);
     
     // Borrar sesión activa
     if (sessions.has(normalized)) {
@@ -1894,6 +1895,7 @@ io.on("connection", (socket) => {
   });
 
   // Eliminar contacto completamente
+  // ✅ CORREGIDO: chatHistory es un array, no un Map
   socket.on("delete_contact", (data) => {
     const { waId } = data;
     if (!waId) return;
@@ -1907,8 +1909,8 @@ io.on("connection", (socket) => {
     vipSet.delete(normalized);
     blockedSet.delete(normalized);
     
-    // Borrar historial de chat
-    chatHistory.delete(normalized);
+    // Borrar historial de chat (chatHistory es un ARRAY, usar filter)
+    chatHistory = chatHistory.filter(m => m.waId !== normalized);
     
     // Borrar sesión activa
     if (sessions.has(normalized)) {
