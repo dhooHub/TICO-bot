@@ -395,7 +395,7 @@
     .price-input::placeholder { color: var(--text-muted); font-weight: 400; }
     .quick-prices {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 0.5rem;
       margin-bottom: 1rem;
     }
@@ -448,6 +448,26 @@
     .chat-info { flex: 1; }
     .chat-name { font-weight: 700; font-size: 1.1rem; }
     .chat-status { font-size: 0.8rem; opacity: 0.8; }
+    .chat-header-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    .chat-header-btn {
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: #fff;
+      font-size: 1.2rem;
+      padding: 0.5rem;
+      border-radius: 50%;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .chat-header-btn:hover {
+      background: rgba(255,255,255,0.25);
+    }
+    .chat-header-btn.danger:hover {
+      background: var(--danger);
+    }
     .chat-messages {
       flex: 1;
       padding: 1rem;
@@ -871,7 +891,7 @@
       </div>
     </div>
 
-    <!-- SETTINGS -->
+    <!-- SETTINGS (SIN PRECIOS RÁPIDOS) -->
     <div class="content" id="tab-settings">
       <div class="settings-section">
         <div class="settings-title">🔔 Notificaciones</div>
@@ -885,13 +905,6 @@
         </div>
       </div>
       <div class="settings-section">
-        <div class="settings-title">💰 Precios rápidos</div>
-        <div id="quickPricesList"></div>
-        <button class="btn btn-secondary btn-sm" style="width:100%;margin-top:0.5rem;" id="addQuickPrice">
-          ➕ Agregar precio
-        </button>
-      </div>
-      <div class="settings-section">
         <div class="settings-title">🎨 Apariencia</div>
         <div class="setting-item">
           <span class="setting-label">Modo oscuro</span>
@@ -902,7 +915,7 @@
         <div class="settings-title">ℹ️ Info</div>
         <div class="setting-item">
           <span class="setting-label">Versión</span>
-          <span style="color:var(--text-muted)">3.0 Flujo B2</span>
+          <span style="color:var(--text-muted)">3.1 Flujo B2</span>
         </div>
       </div>
       <div class="settings-section">
@@ -926,7 +939,6 @@
         <label>Precio del producto (sin envío)</label>
         <input type="number" class="price-input" id="inputPrice" placeholder="₡0" inputmode="numeric">
       </div>
-      <div class="quick-prices" id="quickPricesGrid"></div>
       <div class="modal-actions">
         <button class="btn btn-secondary" id="modalCancel">Cancelar</button>
         <button class="btn btn-primary" id="modalSend">Enviar Precio ✓</button>
@@ -972,7 +984,7 @@
     </div>
   </div>
 
-  <!-- MODAL CONTACTO -->
+  <!-- MODAL CONTACTO (SIN BORRAR CHATS - se hace desde el chat) -->
   <div class="modal-overlay" id="contactModal">
     <div class="modal">
       <div class="modal-handle"></div>
@@ -1021,13 +1033,9 @@
         <button class="btn btn-primary" id="contactModalSave">Guardar ✓</button>
       </div>
       
-      <!-- Acciones peligrosas -->
+      <!-- Solo eliminar contacto, no borrar chats -->
       <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--bg);">
-        <div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:0.8rem;">Acciones</div>
-        <div style="display:flex;gap:0.5rem;">
-          <button class="btn btn-warning btn-sm" style="flex:1;" id="contactDeleteChats">🗑️ Borrar chats</button>
-          <button class="btn btn-danger btn-sm" style="flex:1;" id="contactDeleteContact">❌ Eliminar contacto</button>
-        </div>
+        <button class="btn btn-danger btn-sm" style="width:100%;" id="contactDeleteContact">❌ Eliminar contacto</button>
       </div>
     </div>
   </div>
@@ -1070,21 +1078,19 @@
         <button class="btn btn-secondary" onclick="closeAddContactModal()">Cancelar</button>
         <button class="btn btn-primary" onclick="saveNewContact()">Guardar ✓</button>
       </div>
-      
-      <div style="margin-top:1rem;padding:1rem;background:var(--bg);border-radius:12px;">
-        <div style="font-weight:600;margin-bottom:0.5rem;">💡 Tip</div>
-        <div style="font-size:0.9rem;color:var(--text-muted);">Después de agregar el contacto, podés enviarle un mensaje desde la sección de Chats.</div>
-      </div>
     </div>
   </div>
 
-  <!-- CHAT VIEW -->
+  <!-- CHAT VIEW (CON BOTÓN BORRAR CHAT) -->
   <div class="chat-view" id="chatView">
     <div class="chat-header">
       <button class="chat-back" id="chatBack">←</button>
       <div class="chat-info">
         <div class="chat-name" id="chatName">Cliente</div>
         <div class="chat-status" id="chatStatus">En línea</div>
+      </div>
+      <div class="chat-header-actions">
+        <button class="chat-header-btn danger" id="chatDeleteBtn" title="Borrar chat">🗑️</button>
       </div>
     </div>
     <div class="chat-messages" id="chatMessages"></div>
@@ -1122,8 +1128,7 @@
     let settings = {
       sound: true,
       vibrate: true,
-      dark: false,
-      quickPrices: [5000, 7500, 10000, 15000, 20000, 25000, 30000, 50000]
+      dark: false
     };
 
     // === HELPERS ===
@@ -1147,7 +1152,6 @@
       $('toggleVibrate').classList.toggle('active', settings.vibrate);
       $('toggleDark').classList.toggle('active', settings.dark);
       $('darkToggle').textContent = settings.dark ? '☀️' : '🌙';
-      renderQuickPrices();
     }
 
     function formatPhone(waId) {
@@ -1216,12 +1220,11 @@
       });
 
       socket.on('auth_success', data => {
-        // Guardar PIN en sesión para auto-reconectar
-        sessionStorage.setItem('ticobot_pin', pin);
+        // CAMBIO: Usar localStorage en vez de sessionStorage para persistencia
+        localStorage.setItem('ticobot_pin', pin);
         
         $('login').classList.add('hidden');
         $('app').style.display = 'block';
-        $('storeName').textContent = '🏪 ' + (data.storeName || 'Mi Tienda');
         $('statusDot').classList.add('online');
         
         // Solo mostrar toast si no es auto-login
@@ -1235,7 +1238,7 @@
 
       socket.on('auth_error', msg => {
         // Limpiar PIN guardado si falla
-        sessionStorage.removeItem('ticobot_pin');
+        localStorage.removeItem('ticobot_pin');
         
         $('login').classList.remove('hidden');
         $('app').style.display = 'none';
@@ -1342,6 +1345,18 @@
         renderContacts();
       });
 
+      // Escuchar evento de chats borrados
+      socket.on('chats_deleted', data => {
+        if (chats[data.waId]) {
+          delete chats[data.waId];
+          renderChatList();
+          if (currentChat === data.waId) {
+            $('chatView').classList.remove('active');
+            currentChat = null;
+          }
+        }
+      });
+
       socket.on('disconnect', () => {
         $('statusDot').classList.remove('online');
         toast('🔴 Desconectado - Reconectando...', 'warning');
@@ -1358,11 +1373,10 @@
       connectWithPin(getPin());
     };
 
-    // Cerrar sesión
+    // CAMBIO: Cerrar sesión - SOLO aquí se borra el PIN
     function logout() {
       if (confirm('¿Cerrar sesión?')) {
-        sessionStorage.removeItem('ticobot_pin');
-        sessionStorage.removeItem('ticobot_lastActivity');
+        localStorage.removeItem('ticobot_pin');
         if (socket) socket.disconnect();
         location.reload();
       }
@@ -1424,8 +1438,8 @@
       }
     }
 
-    // Auto-login si hay PIN guardado (sin expiración)
-    const savedPin = sessionStorage.getItem('ticobot_pin');
+    // CAMBIO: Auto-login usando localStorage (persiste entre sesiones)
+    const savedPin = localStorage.getItem('ticobot_pin');
     if (savedPin) {
       window.isAutoLogin = true;
       connectWithPin(savedPin);
@@ -1553,6 +1567,19 @@
       currentChat = null;
     };
 
+    // NUEVO: Botón borrar chat desde la vista del chat
+    $('chatDeleteBtn').onclick = () => {
+      if (!currentChat) return;
+      if (confirm(`¿Borrar todos los mensajes con ${formatPhone(currentChat)}?\n\nEsto no se puede deshacer.`)) {
+        socket.emit('delete_chats', { waId: currentChat });
+        delete chats[currentChat];
+        renderChatList();
+        $('chatView').classList.remove('active');
+        currentChat = null;
+        toast('🗑️ Chat borrado', 'success');
+      }
+    };
+
     $('chatSend').onclick = () => {
       const text = $('chatInput').value.trim();
       if (!text || !currentChat) return;
@@ -1573,33 +1600,13 @@
       currentClient = waId;
       $('modalClient').textContent = formatPhone(waId);
       $('inputPrice').value = '';
-      $('inputShipping').value = '';
       $('priceModal').classList.add('active');
-      renderQuickPricesGrid();
       setTimeout(() => $('inputPrice').focus(), 300);
     }
 
     function closeModal() {
       $('priceModal').classList.remove('active');
       currentClient = null;
-    }
-
-    function renderQuickPricesGrid() {
-      $('quickPricesGrid').innerHTML = settings.quickPrices.map(p => `
-        <button class="quick-price" onclick="selectQuickPrice(${p}, this)">₡${p.toLocaleString()}</button>
-      `).join('');
-    }
-
-    function selectQuickPrice(price, btn) {
-      $('inputPrice').value = price;
-      $$('#quickPricesGrid .quick-price').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
-    }
-
-    function selectQuickShipping(btn, cost) {
-      $('inputShippingCost').value = cost;
-      $$('#quickShippingGrid .quick-price').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
     }
 
     $('modalCancel').onclick = closeModal;
@@ -1639,6 +1646,12 @@
       $('shippingModal').classList.remove('active');
       currentShippingClient = null;
       currentShippingPrice = 0;
+    }
+
+    function selectQuickShipping(btn, cost) {
+      $('inputShippingCost').value = cost;
+      $$('#quickShippingGrid .quick-price').forEach(b => b.classList.remove('selected'));
+      btn.classList.add('selected');
     }
 
     $('shippingModalCancel').onclick = closeShippingModal;
@@ -1731,31 +1744,6 @@
       applySettings();
     };
 
-    function renderQuickPrices() {
-      $('quickPricesList').innerHTML = settings.quickPrices.map((p, i) => `
-        <div class="setting-item">
-          <span>₡${p.toLocaleString()}</span>
-          <button class="btn btn-sm btn-danger" onclick="removeQuickPrice(${i})">🗑️</button>
-        </div>
-      `).join('');
-    }
-
-    function removeQuickPrice(index) {
-      settings.quickPrices.splice(index, 1);
-      saveSettings();
-      renderQuickPrices();
-    }
-
-    $('addQuickPrice').onclick = () => {
-      const price = prompt('Nuevo precio rápido (solo número):');
-      if (price && !isNaN(price) && parseInt(price) > 0) {
-        settings.quickPrices.push(parseInt(price));
-        settings.quickPrices.sort((a, b) => a - b);
-        saveSettings();
-        renderQuickPrices();
-      }
-    };
-
     // === SEARCH ===
     $('searchPending').oninput = renderPending;
     $('searchChats').oninput = renderChatList;
@@ -1829,7 +1817,7 @@
       }
     }
 
-    // === CONTACT MODAL ===
+    // === CONTACT MODAL (SIN BORRAR CHATS) ===
     function openContactModal(waId) {
       currentContact = waId;
       const c = contacts[waId] || { waId, name: '', note: '', tags: [], vip: false, blocked: false };
@@ -1856,17 +1844,6 @@
 
     $('contactVip').onclick = () => $('contactVip').classList.toggle('active');
     $('contactBlocked').onclick = () => $('contactBlocked').classList.toggle('active');
-
-    // Borrar chats del contacto
-    $('contactDeleteChats').onclick = () => {
-      if (!currentContact) return;
-      if (confirm(`¿Borrar todos los chats con ${formatPhone(currentContact)}?\n\nEsto no se puede deshacer.`)) {
-        socket.emit('delete_chats', { waId: currentContact });
-        delete chats[currentContact];
-        renderChatList();
-        toast('🗑️ Chats borrados', 'success');
-      }
-    };
 
     // Eliminar contacto completamente
     $('contactDeleteContact').onclick = () => {
